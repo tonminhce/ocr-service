@@ -60,11 +60,13 @@ independent holds and source preservation. New workers have no automatic pruning
 loop. [A05 backup operations](docs/backup-operations.md) and the
 [detailed restore trace](docs/a05-execution-trace.md) cover encrypted logical
 backups, offline verification and fresh-volume recovery with empty Redis.
-The [A06a trace](docs/a06a-execution-trace.md) verifies native subprocess
+the [A06a trace](docs/a06a-execution-trace.md) verifies native subprocess
 environment/command policy, bounded process-group cleanup and scratch lifetimes
-on Mac and Linux ARM64. A06b parser/container isolation remains unimplemented.
-Policy, destructive apply, live adoption, off-host backup and production restore
-activation remain gated.
+on Mac and Linux ARM64. The [A06b/O01 trace](docs/a06b-execution-trace.md)
+records isolated parser IPC/container fault testing and the worker's bounded
+cached PostgreSQL/Redis observer. Neither trace is a production cutover or
+capacity/accuracy certification; see the [sanitized verification record](docs/research/a06b-o01-verification-2026-10-15.json). Policy, destructive apply, live adoption,
+off-host backup and production restore activation remain gated.
 
 ## CPU protocol demo
 
@@ -171,7 +173,10 @@ crates/
     src/settings.rs        validated worker environment
     src/worker.rs          claims, heartbeats, retries, draining
     src/queue.rs           bounded Redis Streams transport
-    src/preparation.rs     bounded image decoding/PDF rendering
+    src/preparation.rs     worker-side parser IPC and page preparation
+    src/parser_client.rs   bounded Unix IPC client and response validation
+    src/parser_service.rs  isolated PDF/image parsing service
+    src/observer.rs        cached PostgreSQL/Redis operational snapshots
     src/inference.rs       reusable vLLM protocol adapter
     src/layout_runner.rs   bounded native detector subprocess
     src/formatting.rs      SDK 0.1.4 formatter port
@@ -202,7 +207,7 @@ Workers default to 2 concurrent documents, 20 PDF pages, and 40 million input pi
 
 The 600-second total job deadline bounds the whole document, even if individual requests have time remaining. New worker binaries no longer delete terminal jobs automatically. A04 adds a bounded retention preview and maintenance-only hold/release operations, with DB guards against deletion and loss of held source. `RETENTION_DAYS` remains a parsed compatibility setting and does not authorize deletion; destructive apply stays disabled. Monitor stored sources/results until explicit policy and restore gates pass. SIGTERM stops new claims and drains active jobs within the worker deadline; a forced shutdown leaves leases recoverable. Set the Compose grace period to cover any increase to the job deadline.
 
-`/health/live` checks the API process; `/health/ready` checks database reachability. Readiness does not guarantee a healthy model server or active consumer. Logs include job IDs and structured events. Protected process metrics and evaluation tooling are implemented; representative labeled evaluation, production load targets, database backups and tenant isolation remain deployment work. See [operations and design](docs/design.md). Matching retained detector regions and formatter fixtures does not establish general OCR accuracy. Poppler differs from the course's PDFium renderer, Rust crop JPEG/resizing can differ from SDK libraries, and float32 ties can change ranks of model queries that are not retained.
+`/health/live` checks the API process; `/health/ready` checks database reachability. Readiness does not guarantee a healthy model server or active consumer. Logs include job IDs and structured events. Protected process metrics and the worker's 30-second cached queue/outbox/lease/Redis observer are implemented; alert thresholds, PostgreSQL pool/storage, model health, representative labeled evaluation, production load targets, database backup activation and tenant isolation remain deployment work. See [observability](docs/observability.md) and [operations and design](docs/design.md). Matching retained detector regions and formatter fixtures does not establish general OCR accuracy. Poppler differs from the course's PDFium renderer, Rust crop JPEG/resizing can differ from SDK libraries, and float32 ties can change ranks of model queries that are not retained.
 
 ## Verify and develop
 

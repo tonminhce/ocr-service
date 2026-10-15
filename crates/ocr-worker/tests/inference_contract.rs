@@ -22,11 +22,13 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
 type Captured = Arc<Mutex<Vec<(HeaderMap, Value)>>>;
+mod support;
 
 struct MockServer {
     base: String,
     handle: JoinHandle<()>,
     captured: Captured,
+    parser: support::parser::ParserHarness,
 }
 impl Drop for MockServer {
     fn drop(&mut self) {
@@ -52,6 +54,7 @@ async fn server(status: StatusCode, body: Value) -> MockServer {
 }
 
 async fn serve(app: Router, captured: Captured) -> MockServer {
+    let parser = support::parser::ParserHarness::start().await;
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let base = format!("http://{}/v1", listener.local_addr().unwrap());
     let handle = tokio::spawn(async move {
@@ -61,10 +64,15 @@ async fn serve(app: Router, captured: Captured) -> MockServer {
         base,
         handle,
         captured,
+        parser,
     }
 }
 
-fn settings(base: &str) -> Settings {
+fn settings(server: &MockServer) -> Settings {
+    settings_for(&server.base, server.parser.socket_path())
+}
+
+fn settings_for(base: &str, parser_socket_path: std::path::PathBuf) -> Settings {
     Settings {
         database_url: "postgres://unused".into(),
         redis_url: "redis://localhost:6379".into(),
@@ -103,6 +111,7 @@ fn settings(base: &str) -> Settings {
         recovery_expansion_pixels: 16,
         recognize_image_regions: false,
         pdf_render_timeout_seconds: 30,
+        parser_socket_path,
         max_output_tokens: 8192,
         retention_days: 7,
     }
@@ -125,7 +134,7 @@ async fn records_genuine_usage_crop_dimensions_and_declared_identity_without_cha
     let mut body = completion("Nội dung nguyên bản 012345678901", "stop");
     body["usage"] = json!({"prompt_tokens":17,"completion_tokens":3,"total_tokens":20});
     let server = server(StatusCode::OK, body).await;
-    let mut config = settings(&server.base);
+    let mut config = settings(&server);
     config.inference_deployment = Some(ocr_worker::telemetry::DeploymentDeclaration::parse(
         r#"{"runtime":"test-runtime","runtime_version":"1.0","max_sequences":1,"max_pixels":1572864}"#
     ).unwrap());
@@ -223,7 +232,7 @@ async fn absent_invalid_partial_and_overflow_usage_never_become_estimated_tokens
             response["usage"] = usage;
         }
         let server = server(StatusCode::OK, response).await;
-        let recognizer = Recognizer::new(settings(&server.base)).unwrap();
+        let recognizer = Recognizer::new(settings(&server)).unwrap();
         assert_eq!(
             recognizer.transcribe_jpeg(b"fixture-jpeg").await.unwrap(),
             "unchanged"
@@ -262,7 +271,7 @@ async fn bounded_finish_reasons_include_truncation_and_unknown_but_do_not_accept
         let mut response = completion("partial", reason);
         response["usage"] = json!({"total_tokens":5});
         let server = server(StatusCode::OK, response).await;
-        let recognizer = Recognizer::new(settings(&server.base)).unwrap();
+        let recognizer = Recognizer::new(settings(&server)).unwrap();
         let error = recognizer.transcribe_jpeg(b"jpeg").await.unwrap_err();
         assert!(!error.retryable);
         assert!(!error.message.contains("private arbitrary reason"));
@@ -315,7 +324,7 @@ async fn cancellation_distinguishes_queued_work_from_started_http_and_releases_l
         }),
     );
     let server = serve(app, Arc::default()).await;
-    let mut config = settings(&server.base);
+    let mut config = settings(&server);
     config.region_concurrency = 1;
     let recognizer = Recognizer::new(config).unwrap();
     let clone = recognizer.clone();
@@ -353,7 +362,7 @@ async fn cancellation_distinguishes_queued_work_from_started_http_and_releases_l
 #[tokio::test]
 async fn sends_openai_multimodal_contract_and_preserves_page_result() {
     let server = server(StatusCode::OK, completion("# Receipt\n\nTotal: 42", "stop")).await;
-    let recognizer = Recognizer::new(settings(&server.base)).unwrap();
+    let recognizer = Recognizer::new(settings(&server)).unwrap();
     let result = recognizer
         .recognize(png(8, 4, [255; 4]), "image/png", CancellationToken::new())
         .await
@@ -391,6 +400,23 @@ async fn sends_openai_multimodal_contract_and_preserves_page_result() {
 }
 
 #[tokio::test]
+async fn missing_isolated_parser_fails_closed_before_model_inference() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut config = settings_for(
+        "http://127.0.0.1:8000/v1",
+        directory.path().join("missing.sock"),
+    );
+    config.strategy = ocr_worker::settings::OcrStrategy::FullPage;
+    let error = Recognizer::new(config)
+        .unwrap()
+        .recognize(png(8, 4, [255; 4]), "image/png", CancellationToken::new())
+        .await
+        .unwrap_err();
+    assert!(error.retryable);
+    assert_eq!(error.message, "isolated parser is unavailable");
+}
+
+#[tokio::test]
 async fn classifies_rate_limits_and_server_errors_as_retryable() {
     for (status, retryable) in [
         (429, true),
@@ -404,7 +430,7 @@ async fn classifies_rate_limits_and_server_errors_as_retryable() {
             json!({"error":"private upstream message"}),
         )
         .await;
-        let error = Recognizer::new(settings(&server.base))
+        let error = Recognizer::new(settings(&server))
             .unwrap()
             .transcribe_jpeg(b"jpeg")
             .await
@@ -423,7 +449,7 @@ async fn truncated_and_malformed_results_never_become_successes() {
         json!({"choices":[{"message":{"content":"text"}}]}),
     ] {
         let server = server(StatusCode::OK, response).await;
-        let error = Recognizer::new(settings(&server.base))
+        let error = Recognizer::new(settings(&server))
             .unwrap()
             .transcribe_jpeg(b"jpeg")
             .await
@@ -440,7 +466,7 @@ async fn truncated_and_malformed_results_never_become_successes() {
 async fn stopped_empty_page_output_is_preserved_and_labeled_empty() {
     for text in ["", "   \n"] {
         let server = server(StatusCode::OK, completion(text, "stop")).await;
-        let result = Recognizer::new(settings(&server.base))
+        let result = Recognizer::new(settings(&server))
             .unwrap()
             .recognize(png(8, 8, [255; 4]), "image/png", CancellationToken::new())
             .await
@@ -471,7 +497,7 @@ async fn refuses_redirects_instead_of_forwarding_upstream_credentials() {
             }),
         );
     let server = serve(app, captured).await;
-    let error = Recognizer::new(settings(&server.base))
+    let error = Recognizer::new(settings(&server))
         .unwrap()
         .transcribe_jpeg(b"jpeg")
         .await
@@ -494,7 +520,7 @@ async fn bounds_streamed_responses_without_content_length() {
         }),
     );
     let server = serve(app, Arc::new(Mutex::new(Vec::new()))).await;
-    let error = Recognizer::new(settings(&server.base))
+    let error = Recognizer::new(settings(&server))
         .unwrap()
         .transcribe_jpeg(b"jpeg")
         .await
@@ -513,7 +539,7 @@ async fn inference_timeout_is_retryable_and_unauthenticated_mode_omits_header() 
         }),
     );
     let server = serve(app, Arc::new(Mutex::new(Vec::new()))).await;
-    let mut config = settings(&server.base);
+    let mut config = settings(&server);
     config.request_timeout_seconds = 1;
     let error = Recognizer::new(config)
         .unwrap()
@@ -522,7 +548,7 @@ async fn inference_timeout_is_retryable_and_unauthenticated_mode_omits_header() 
         .unwrap_err();
     assert!(error.retryable);
     let server = self::server(StatusCode::OK, completion("ok", "stop")).await;
-    let mut config = settings(&server.base);
+    let mut config = settings(&server);
     config.vllm_api_key = None;
     Recognizer::new(config)
         .unwrap()
@@ -627,7 +653,7 @@ fn applies_phone_jpeg_rotation_and_mirroring_before_metadata_is_stripped() {
 #[tokio::test]
 async fn rejects_forged_media_type_before_inference() {
     let server = server(StatusCode::OK, completion("unused", "stop")).await;
-    let recognizer = Recognizer::new(settings(&server.base)).unwrap();
+    let recognizer = Recognizer::new(settings(&server)).unwrap();
     assert!(
         recognizer
             .recognize(png(8, 8, [255; 4]), "image/jpeg", CancellationToken::new())
@@ -677,7 +703,10 @@ fn pdf_page_count_encryption_and_limits_fail_closed() {
 
 #[test]
 fn validates_configuration_without_leaking_secrets() {
-    let mut config = settings("http://127.0.0.1:8000/v1");
+    let mut config = settings_for(
+        "http://127.0.0.1:8000/v1",
+        std::env::temp_dir().join("ocr-parser-validation.sock"),
+    );
     assert!(config.validate().is_ok());
     config.redis_url = "https://redis-user:redis-secret@example.test".into();
     let error = config.validate().unwrap_err().to_string();
@@ -701,6 +730,9 @@ fn validates_configuration_without_leaking_secrets() {
     config.worker_concurrency = 2;
     config.max_pages = 0;
     assert!(config.validate().is_err());
+    config.max_pages = 20;
+    config.max_image_pixels = 100_000_000;
+    assert!(config.validate().is_err());
 }
 
 #[tokio::test]
@@ -708,7 +740,7 @@ fn validates_configuration_without_leaking_secrets() {
 async fn pdf_pages_render_in_order_and_page_limit_is_checked_before_inference() {
     let input = include_bytes!("fixtures/two_pages.pdf").to_vec();
     let server = server(StatusCode::OK, completion("page text", "stop")).await;
-    let mut config = settings(&server.base);
+    let mut config = settings(&server);
     config.max_image_edge = 128;
     let result = Recognizer::new(config.clone())
         .unwrap()
@@ -746,7 +778,10 @@ async fn pdf_pages_render_in_order_and_page_limit_is_checked_before_inference() 
 
 #[test]
 fn validates_warm_pool_checkpoint_revision_and_recovery_budgets() {
-    let baseline = settings("http://127.0.0.1:8000/v1");
+    let baseline = settings_for(
+        "http://127.0.0.1:8000/v1",
+        std::env::temp_dir().join("ocr-parser-validation.sock"),
+    );
     assert!(baseline.validate().is_ok());
     for pool_size in [0, baseline.worker_concurrency + 1, 9] {
         let mut config = baseline.clone();

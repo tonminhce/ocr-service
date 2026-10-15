@@ -1,0 +1,508 @@
+use std::{collections::HashSet, path::Path, time::Duration};
+
+use image::RgbImage;
+use ocr_extraction::SourceBlock;
+use sha2::{Digest, Sha256};
+use tokio::{
+    net::UnixStream,
+    sync::{Mutex, MutexGuard},
+    time::timeout,
+};
+use tokio_util::sync::CancellationToken;
+
+use crate::{
+    ProcessingError,
+    parser_protocol::{
+        ErrorCode, Frame, FrameKind, Operation, REQUEST_DATA_LIMIT, RESPONSE_DATA_LIMIT,
+        RenderProfile, read_frame, write_frame,
+    },
+    settings::Settings,
+};
+
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
+const NATIVE_BLOCKS_LIMIT: usize = 10_000;
+const NATIVE_TEXT_LIMIT: usize = 4 * 1024 * 1024;
+
+pub struct ParserSession {
+    stream: Mutex<Option<UnixStream>>,
+    pages: u32,
+    timeout: Duration,
+    source_sha256: String,
+    max_pixels: u64,
+    max_image_edge: u32,
+    page_max_edge: u32,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct ParserLimits {
+    pub max_pages: u32,
+    pub max_pixels: u64,
+    pub max_image_edge: u32,
+    pub render_dpi: u32,
+    pub page_max_edge: u32,
+    pub timeout_seconds: u64,
+}
+
+impl Default for ParserLimits {
+    fn default() -> Self {
+        Self {
+            max_pages: 20,
+            max_pixels: 40_000_000,
+            max_image_edge: 2000,
+            render_dpi: 200,
+            page_max_edge: 3500,
+            timeout_seconds: 30,
+        }
+    }
+}
+
+impl From<&Settings> for ParserLimits {
+    fn from(settings: &Settings) -> Self {
+        Self {
+            max_pages: settings.max_pages,
+            max_pixels: settings.max_image_pixels,
+            max_image_edge: settings.max_image_edge,
+            render_dpi: settings.pdf_render_dpi,
+            page_max_edge: settings.page_max_edge,
+            timeout_seconds: settings.pdf_render_timeout_seconds,
+        }
+    }
+}
+
+impl ParserSession {
+    pub async fn open(
+        socket_path: &Path,
+        input: Vec<u8>,
+        media_type: &str,
+        limits: ParserLimits,
+        cancelled: CancellationToken,
+    ) -> Result<Self, ProcessingError> {
+        if input.is_empty() || input.len() as u64 > REQUEST_DATA_LIMIT {
+            return Err(ProcessingError::permanent(
+                "document exceeds isolated parser input limit",
+            ));
+        }
+        let source_sha256 = format!("{:x}", Sha256::digest(&input));
+        let mut stream = connect(socket_path, CONNECT_TIMEOUT, &cancelled).await?;
+        let timeout = Duration::from_secs(limits.timeout_seconds);
+        let operation = Operation::Open {
+            media_type: media_type.to_owned(),
+            max_pages: limits.max_pages,
+            max_pixels: limits.max_pixels,
+            max_image_edge: limits.max_image_edge,
+            render_dpi: limits.render_dpi,
+            page_max_edge: limits.page_max_edge,
+            timeout_seconds: limits.timeout_seconds,
+        };
+        let frame = exchange(
+            &mut stream,
+            operation,
+            input,
+            timeout,
+            &cancelled,
+            REQUEST_DATA_LIMIT,
+        )
+        .await?;
+        let Operation::Opened { pages } = frame.operation else {
+            return Err(unexpected_response());
+        };
+        if pages == 0 || pages > limits.max_pages {
+            return Err(unexpected_response());
+        }
+        Ok(Self {
+            stream: Mutex::new(Some(stream)),
+            pages,
+            timeout,
+            source_sha256,
+            max_pixels: limits.max_pixels,
+            max_image_edge: limits.max_image_edge,
+            page_max_edge: limits.page_max_edge,
+        })
+    }
+
+    pub fn page_count(&self) -> u32 {
+        self.pages
+    }
+
+    pub fn source_sha256(&self) -> &str {
+        &self.source_sha256
+    }
+
+    pub async fn page_info(
+        &self,
+        page: u32,
+        cancelled: CancellationToken,
+    ) -> Result<(f64, f64), ProcessingError> {
+        let frame = self
+            .request(Operation::PageInfo { page }, cancelled)
+            .await?;
+        let Operation::PageInfoResult {
+            width_points,
+            height_points,
+        } = frame.operation
+        else {
+            return Err(unexpected_response());
+        };
+        if !width_points.is_finite()
+            || !height_points.is_finite()
+            || width_points <= 0.0
+            || height_points <= 0.0
+        {
+            return Err(unexpected_response());
+        }
+        Ok((width_points, height_points))
+    }
+
+    pub async fn render_rgb(
+        &self,
+        page: u32,
+        profile: RenderProfile,
+        cancelled: CancellationToken,
+    ) -> Result<RgbImage, ProcessingError> {
+        let frame = self
+            .request(Operation::RenderRgb { page, profile }, cancelled)
+            .await?;
+        let Operation::RgbResult { width, height } = frame.operation else {
+            return Err(unexpected_response());
+        };
+        let max_edge = match profile {
+            RenderProfile::FullPage => self.max_image_edge,
+            RenderProfile::CourseLayout => self.page_max_edge,
+        };
+        if width == 0
+            || height == 0
+            || width > max_edge
+            || height > max_edge
+            || u64::from(width) * u64::from(height) > self.max_pixels
+        {
+            return Err(unexpected_response());
+        }
+        RgbImage::from_raw(width, height, frame.data).ok_or_else(unexpected_response)
+    }
+
+    pub async fn native_text(
+        &self,
+        cancelled: CancellationToken,
+    ) -> Result<Vec<SourceBlock>, ProcessingError> {
+        let frame = self.request(Operation::NativeText, cancelled).await?;
+        if frame.operation != Operation::NativeTextResult || frame.data.len() > NATIVE_TEXT_LIMIT {
+            return Err(unexpected_response());
+        }
+        let blocks: Vec<SourceBlock> = serde_json::from_slice(&frame.data)
+            .map_err(|_| ProcessingError::permanent("isolated parser response is invalid"))?;
+        let mut ids = HashSet::with_capacity(blocks.len());
+        if blocks.len() > NATIVE_BLOCKS_LIMIT
+            || blocks.iter().any(|block| {
+                let prefix = format!("native:p{}:row", block.page_number);
+                let valid_id = block.id.strip_prefix(&prefix).is_some_and(|row| {
+                    !row.is_empty() && row.bytes().all(|byte| byte.is_ascii_digit())
+                });
+                block.page_number == 0
+                    || block.page_number > self.pages
+                    || block.id.is_empty()
+                    || block.id.len() > 64
+                    || !valid_id
+                    || !ids.insert(block.id.as_str())
+                    || block.source != "native_pdf"
+                    || block.region_index.is_some()
+                    || block.detector_score.is_some()
+                    || block.text.is_empty()
+                    || block.text.len() > 128 * 1024
+                    || block.text.chars().any(|character| character.is_control())
+                    || !block.bbox_2d.is_some_and(|bbox| {
+                        bbox.iter().all(|value| (0..=1000).contains(value))
+                            && bbox[0] < bbox[2]
+                            && bbox[1] < bbox[3]
+                    })
+            })
+            || blocks.iter().map(|block| block.text.len()).sum::<usize>() > NATIVE_TEXT_LIMIT
+        {
+            return Err(unexpected_response());
+        }
+        Ok(blocks)
+    }
+
+    async fn request(
+        &self,
+        operation: Operation,
+        cancelled: CancellationToken,
+    ) -> Result<Frame, ProcessingError> {
+        let mut stream = lock_stream(&self.stream, self.timeout, &cancelled).await?;
+        let Some(socket) = stream.as_mut() else {
+            return Err(parser_unavailable());
+        };
+        let frame = Frame {
+            operation,
+            data: Vec::new(),
+        };
+        let exchange = async {
+            write_frame(socket, FrameKind::Request, &frame, REQUEST_DATA_LIMIT)
+                .await
+                .map_err(protocol_error)?;
+            read_frame(socket, FrameKind::Response, RESPONSE_DATA_LIMIT)
+                .await
+                .map_err(protocol_error)
+        };
+        let result = tokio::select! {
+            biased;
+            _ = cancelled.cancelled() => Err(ProcessingError::transient("job processing cancelled")),
+            result = tokio::time::timeout(self.timeout, exchange) => match result {
+                Ok(result) => result,
+                Err(_) => Err(ProcessingError::transient("isolated parser operation timed out")),
+            },
+        };
+        match result {
+            Ok(frame) => operation_result(frame),
+            Err(error) => {
+                stream.take();
+                Err(error)
+            }
+        }
+    }
+}
+
+pub async fn health_check(socket_path: &Path, budget: Duration) -> Result<(), ProcessingError> {
+    let cancelled = CancellationToken::new();
+    let mut stream = connect(socket_path, budget, &cancelled).await?;
+    let frame = exchange(
+        &mut stream,
+        Operation::HealthCheck,
+        Vec::new(),
+        budget,
+        &cancelled,
+        REQUEST_DATA_LIMIT,
+    )
+    .await?;
+    if frame.operation == Operation::HealthReady && frame.data.is_empty() {
+        Ok(())
+    } else {
+        Err(unexpected_response())
+    }
+}
+
+async fn connect(
+    socket_path: &Path,
+    budget: Duration,
+    cancelled: &CancellationToken,
+) -> Result<UnixStream, ProcessingError> {
+    tokio::select! {
+        biased;
+        _ = cancelled.cancelled() => Err(ProcessingError::transient("job processing cancelled")),
+        result = timeout(budget.min(CONNECT_TIMEOUT), UnixStream::connect(socket_path)) => match result {
+            Ok(Ok(stream)) => Ok(stream),
+            Ok(Err(_)) => Err(parser_unavailable()),
+            Err(_) => Err(ProcessingError::transient("isolated parser connection timed out")),
+        }
+    }
+}
+
+async fn exchange(
+    stream: &mut UnixStream,
+    operation: Operation,
+    data: Vec<u8>,
+    budget: Duration,
+    cancelled: &CancellationToken,
+    data_limit: u64,
+) -> Result<Frame, ProcessingError> {
+    let request = Frame { operation, data };
+    let exchange = async {
+        write_frame(stream, FrameKind::Request, &request, data_limit)
+            .await
+            .map_err(protocol_error)?;
+        read_frame(stream, FrameKind::Response, RESPONSE_DATA_LIMIT)
+            .await
+            .map_err(protocol_error)
+    };
+    let frame = tokio::select! {
+        biased;
+        _ = cancelled.cancelled() => return Err(ProcessingError::transient("job processing cancelled")),
+        result = timeout(budget, exchange) => match result {
+            Ok(result) => result?,
+            Err(_) => return Err(ProcessingError::transient("isolated parser operation timed out")),
+        }
+    };
+    operation_result(frame)
+}
+
+async fn lock_stream<'a>(
+    stream: &'a Mutex<Option<UnixStream>>,
+    budget: Duration,
+    cancelled: &CancellationToken,
+) -> Result<MutexGuard<'a, Option<UnixStream>>, ProcessingError> {
+    tokio::select! {
+        biased;
+        _ = cancelled.cancelled() => Err(ProcessingError::transient("job processing cancelled")),
+        result = timeout(budget, stream.lock()) => result
+            .map_err(|_| ProcessingError::transient("isolated parser admission timed out")),
+    }
+}
+
+fn operation_result(frame: Frame) -> Result<Frame, ProcessingError> {
+    if let Operation::Error { code } = frame.operation {
+        return Err(match code {
+            ErrorCode::InvalidDocument => ProcessingError::permanent("invalid document input"),
+            ErrorCode::UnsupportedMediaType => {
+                ProcessingError::permanent("unsupported document media type")
+            }
+            ErrorCode::PageLimitExceeded { actual, limit } => {
+                ProcessingError::permanent(format!("PDF has {actual} pages; the limit is {limit}"))
+            }
+            ErrorCode::InvalidPage => ProcessingError::permanent("invalid document page number"),
+            ErrorCode::OutputLimit => {
+                ProcessingError::permanent("document parser output limit exceeded")
+            }
+            ErrorCode::Cancelled => ProcessingError::transient("job processing cancelled"),
+            ErrorCode::RenderFailed => ProcessingError::permanent("document rendering failed"),
+            ErrorCode::DecodeFailed => ProcessingError::permanent("image decoding failed"),
+            ErrorCode::Busy => ProcessingError::transient("isolated parser is at capacity"),
+            ErrorCode::Internal => parser_unavailable(),
+        });
+    }
+    if !frame.data.is_empty()
+        && !matches!(
+            frame.operation,
+            Operation::RgbResult { .. } | Operation::NativeTextResult
+        )
+    {
+        return Err(unexpected_response());
+    }
+    Ok(frame)
+}
+
+fn protocol_error(_error: crate::parser_protocol::ProtocolError) -> ProcessingError {
+    ProcessingError::transient("isolated parser IPC failed")
+}
+
+fn parser_unavailable() -> ProcessingError {
+    ProcessingError::transient("isolated parser is unavailable")
+}
+
+fn unexpected_response() -> ProcessingError {
+    ProcessingError::transient("isolated parser returned an invalid response")
+}
+
+#[cfg(test)]
+mod tests {
+    use std::os::unix::fs::PermissionsExt;
+
+    use tempfile::TempDir;
+    use tokio::{net::UnixListener, task::JoinHandle};
+
+    use super::*;
+
+    async fn malicious_session(
+        requested: Operation,
+        response: Frame,
+    ) -> (ParserSession, JoinHandle<()>, TempDir) {
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let socket_directory = directory.path().join("socket");
+        std::fs::create_dir(&socket_directory).unwrap();
+        std::fs::set_permissions(&socket_directory, std::fs::Permissions::from_mode(0o700))
+            .unwrap();
+        let socket_path = socket_directory.join("parser.sock");
+        let listener = UnixListener::bind(&socket_path).unwrap();
+        let response_kind = requested.clone();
+        let helper = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let open = read_frame(&mut stream, FrameKind::Request, REQUEST_DATA_LIMIT)
+                .await
+                .unwrap();
+            assert!(matches!(open.operation, Operation::Open { .. }));
+            write_frame(
+                &mut stream,
+                FrameKind::Response,
+                &Frame {
+                    operation: Operation::Opened { pages: 1 },
+                    data: Vec::new(),
+                },
+                RESPONSE_DATA_LIMIT,
+            )
+            .await
+            .unwrap();
+            let request = read_frame(&mut stream, FrameKind::Request, REQUEST_DATA_LIMIT)
+                .await
+                .unwrap();
+            assert_eq!(request.operation, response_kind);
+            write_frame(
+                &mut stream,
+                FrameKind::Response,
+                &response,
+                RESPONSE_DATA_LIMIT,
+            )
+            .await
+            .unwrap();
+        });
+        let limits = ParserLimits {
+            max_pages: 1,
+            max_pixels: 4000,
+            max_image_edge: 40,
+            render_dpi: 144,
+            page_max_edge: 40,
+            timeout_seconds: 3,
+        };
+        let session = ParserSession::open(
+            &socket_path,
+            b"%PDF-synthetic-test".to_vec(),
+            "application/pdf",
+            limits,
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+        (session, helper, directory)
+    }
+
+    #[tokio::test]
+    async fn rejects_helper_rgb_dimensions_outside_the_requested_render_bounds() {
+        let request = Operation::RenderRgb {
+            page: 1,
+            profile: RenderProfile::CourseLayout,
+        };
+        let response = Frame {
+            operation: Operation::RgbResult {
+                width: 80,
+                height: 1,
+            },
+            data: vec![255; 80 * 3],
+        };
+        let (session, helper, _directory) = malicious_session(request, response).await;
+        let error = session
+            .render_rgb(1, RenderProfile::CourseLayout, CancellationToken::new())
+            .await
+            .unwrap_err();
+        assert_eq!(
+            error.message,
+            "isolated parser returned an invalid response"
+        );
+        helper.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn rejects_forged_native_source_and_out_of_page_geometry() {
+        let request = Operation::NativeText;
+        let blocks = vec![SourceBlock {
+            id: "native:p1:row0".into(),
+            page_number: 1,
+            region_index: None,
+            source: "forged_source".into(),
+            text: "not trusted".into(),
+            bbox_2d: Some([-1, 1, 10, 10]),
+            detector_score: None,
+        }];
+        let response = Frame {
+            operation: Operation::NativeTextResult,
+            data: serde_json::to_vec(&blocks).unwrap(),
+        };
+        let (session, helper, _directory) = malicious_session(request, response).await;
+        let error = session
+            .native_text(CancellationToken::new())
+            .await
+            .unwrap_err();
+        assert_eq!(
+            error.message,
+            "isolated parser returned an invalid response"
+        );
+        helper.await.unwrap();
+    }
+}

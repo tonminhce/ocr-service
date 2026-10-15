@@ -18,6 +18,7 @@ use sqlx::{PgPool, postgres::PgPoolOptions};
 use tokio::{sync::Notify, task::JoinHandle};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
+mod support;
 
 struct Database {
     admin: PgPool,
@@ -27,9 +28,11 @@ struct Database {
     redis_url: String,
     redis_stream: String,
     redis_group: String,
+    parser: support::parser::ParserHarness,
 }
 impl Database {
     async fn new() -> Self {
+        let parser = support::parser::ParserHarness::start().await;
         let redis_url =
             std::env::var("TEST_REDIS_URL").expect("TEST_REDIS_URL is required for ignored tests");
         let url = std::env::var("TEST_DATABASE_URL")
@@ -63,6 +66,7 @@ impl Database {
             redis_group: format!("test-{}", Uuid::new_v4()),
             redis_url,
             schema,
+            parser,
         }
     }
     async fn redis(&self) -> redis::aio::MultiplexedConnection {
@@ -245,6 +249,7 @@ fn settings(base: &str, db: &Database) -> Settings {
         recovery_expansion_pixels: 16,
         recognize_image_regions: false,
         pdf_render_timeout_seconds: 30,
+        parser_socket_path: db.parser.socket_path(),
         max_output_tokens: 8192,
         retention_days: 7,
     }

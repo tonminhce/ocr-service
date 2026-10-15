@@ -125,6 +125,16 @@ impl RedisQueue {
         }
     }
 
+    /// Cached by the background observer; never called by request or scrape paths.
+    pub async fn operational_snapshot(&self) -> Result<(u64, u64), QueueError> {
+        let pending: redis::streams::StreamPendingReply = self
+            .query(redis::cmd("XPENDING").arg(&self.stream).arg(&self.group))
+            .await?;
+        let info: String = self.query(redis::cmd("INFO").arg("memory")).await?;
+        let used_memory = parse_used_memory(&info).ok_or(QueueError::Command)?;
+        Ok((pending.count() as u64, used_memory))
+    }
+
     /// Notifications contain only a job ID. Original bytes and result payloads
     /// never enter Redis. No MAXLEN trim can remove a pending notification.
     pub async fn publish(&self, job_id: Uuid) -> Result<String, QueueError> {
@@ -209,6 +219,13 @@ impl RedisQueue {
     }
 }
 
+fn parse_used_memory(info: &str) -> Option<u64> {
+    info.lines()
+        .find_map(|line| line.strip_prefix("used_memory:"))?
+        .parse()
+        .ok()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -239,5 +256,79 @@ mod tests {
         assert!(!error.contains("test-user"));
         assert!(!error.contains("redis://"));
         server.abort();
+    }
+
+    #[test]
+    fn redis_memory_parser_accepts_only_a_bounded_numeric_field() {
+        assert_eq!(
+            parse_used_memory("# Memory\nused_memory:4096\n"),
+            Some(4096)
+        );
+        assert_eq!(parse_used_memory("used_memory:-1\n"), None);
+        assert_eq!(parse_used_memory("used_memory:unknown\n"), None);
+        assert_eq!(parse_used_memory("used_memory_peak:8192\n"), None);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires TEST_REDIS_URL and a dedicated disposable Redis"]
+    async fn operational_snapshot_reads_stream_pending_count_and_memory() {
+        let url = std::env::var("TEST_REDIS_URL")
+            .expect("TEST_REDIS_URL must name a disposable Redis server");
+        let client = redis::Client::open(url).expect("test Redis URL must be valid");
+        let stream = format!("ocr:test:observer:{}", Uuid::new_v4());
+        let group = format!("observer:{}", Uuid::new_v4());
+        let consumer = "observer-test";
+        let mut connection = client
+            .get_multiplexed_async_connection()
+            .await
+            .expect("disposable Redis must be reachable");
+        let _: String = redis::cmd("XGROUP")
+            .arg("CREATE")
+            .arg(&stream)
+            .arg(&group)
+            .arg("0")
+            .arg("MKSTREAM")
+            .query_async(&mut connection)
+            .await
+            .expect("test consumer group must be created");
+        let _: String = redis::cmd("XADD")
+            .arg(&stream)
+            .arg("*")
+            .arg("job_id")
+            .arg(Uuid::new_v4().to_string())
+            .query_async(&mut connection)
+            .await
+            .expect("synthetic stream notification must be added");
+        let _: redis::streams::StreamReadReply = redis::cmd("XREADGROUP")
+            .arg("GROUP")
+            .arg(&group)
+            .arg(consumer)
+            .arg("STREAMS")
+            .arg(&stream)
+            .arg(">")
+            .query_async(&mut connection)
+            .await
+            .expect("synthetic notification must become pending");
+
+        let queue = RedisQueue {
+            client,
+            connection: Arc::default(),
+            stream: stream.clone(),
+            group: group.clone(),
+            consumer: consumer.into(),
+            timeout: Duration::from_secs(2),
+        };
+        let (pending, memory) = queue
+            .operational_snapshot()
+            .await
+            .expect("observer commands must return bounded metrics");
+        assert_eq!(pending, 1);
+        assert!(memory > 0);
+
+        let _: i64 = redis::cmd("DEL")
+            .arg(&stream)
+            .query_async(&mut connection)
+            .await
+            .expect("synthetic stream must be removed");
     }
 }

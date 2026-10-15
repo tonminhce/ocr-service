@@ -1481,6 +1481,66 @@ async fn expired_final_notification_terminalizes_job_and_stops_outbox_replay() {
     db.cleanup().await;
 }
 
+#[tokio::test]
+#[ignore = "requires TEST_DATABASE_URL"]
+async fn operational_snapshot_reports_bounded_queue_and_lease_aggregates() {
+    let db = TestDatabase::new().await;
+
+    let failed_id = db.store.submit(document(None)).await.unwrap().job.id;
+    let failed = db
+        .store
+        .claim_by_id(failed_id, 60, 3)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        db.store
+            .fail(
+                failed_id,
+                failed.lease_token,
+                "synthetic failure",
+                false,
+                3,
+                0
+            )
+            .await
+            .unwrap()
+    );
+
+    let processing_id = db.store.submit(document(None)).await.unwrap().job.id;
+    db.store
+        .claim_by_id(processing_id, 60, 3)
+        .await
+        .unwrap()
+        .unwrap();
+    db.expire(processing_id).await;
+    let active_id = db.store.submit(document(None)).await.unwrap().job.id;
+    db.store
+        .claim_by_id(active_id, 60, 3)
+        .await
+        .unwrap()
+        .unwrap();
+    db.store.submit(document(None)).await.unwrap();
+    let delayed_id = db.store.submit(document(None)).await.unwrap().job.id;
+    sqlx::query(
+        "UPDATE jobs SET available_at = clock_timestamp() + INTERVAL '1 hour' WHERE id = $1",
+    )
+    .bind(delayed_id)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+
+    let snapshot = db.store.operational_snapshot().await.unwrap();
+    assert_eq!(snapshot.queued_jobs, 2);
+    assert_eq!(snapshot.processing_jobs, 2);
+    assert_eq!(snapshot.failed_jobs_24h, 1);
+    assert_eq!(snapshot.eligible_jobs, 1);
+    assert_eq!(snapshot.delayed_jobs, 1);
+    assert_eq!(snapshot.expired_leases, 1);
+    assert_eq!(snapshot.due_outbox_jobs, 2);
+    db.cleanup().await;
+}
+
 #[derive(Clone, Copy)]
 enum ExpiringWrite {
     Renew,

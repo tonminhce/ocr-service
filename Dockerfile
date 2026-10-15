@@ -2,7 +2,7 @@ FROM rust:1-bookworm@sha256:114c7a4425406451c2866b6aafe69fe29b1b298832db1277d411
 WORKDIR /app
 COPY Cargo.toml Cargo.lock ./
 COPY crates ./crates
-RUN cargo build --release --locked --bin ocr-api --bin ocr-worker --bin layout-detect --bin ocr-eval --bin ocr-admin --bin ocr-secrets --bin ocr-backup \
+RUN cargo build --release --locked --bin ocr-api --bin ocr-worker --bin parser-renderer --bin layout-detect --bin ocr-eval --bin ocr-admin --bin ocr-secrets --bin ocr-backup \
     && cargo build --release --locked -p ocr-worker --example mock_vllm --example make_fixtures \
     && cargo build --release --locked -p ocr-api --example service_client
 
@@ -51,9 +51,20 @@ CMD ["ocr-backup", "--help"]
 FROM backup-ops AS backup-rehearsal
 COPY --from=backup-rehearsal-builder /app/target/release/examples/backup_rehearsal /usr/local/bin/backup-rehearsal
 
+# Isolated document parser image: no API, worker, model, credentials, or ONNX runtime.
+FROM debian:bookworm-slim@sha256:7c7b2c966bc9ee8cedfeef67e0e279108992c77681fa595db4a9d65c06ccc587 AS parser-runtime
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends poppler-utils \
+    && rm -rf /var/lib/apt/lists/* \
+    && useradd --uid 10002 --no-create-home --shell /usr/sbin/nologin ocr-parser \
+    && install -d -o 10002 -g 10002 -m 0700 /scratch
+COPY --from=builder /app/target/release/parser-renderer /usr/local/bin/parser-renderer
+USER 10002:10001
+ENTRYPOINT ["parser-renderer"]
+
 FROM debian:bookworm-slim@sha256:7c7b2c966bc9ee8cedfeef67e0e279108992c77681fa595db4a9d65c06ccc587
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates poppler-utils \
+    && apt-get install -y --no-install-recommends ca-certificates \
     && rm -rf /var/lib/apt/lists/* \
     && useradd --uid 10001 --create-home ocr
 COPY --from=builder /app/target/release/ocr-api /usr/local/bin/ocr-api

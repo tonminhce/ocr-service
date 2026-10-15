@@ -54,7 +54,10 @@ struct MockVllm {
     requests: Arc<Mutex<Vec<CapturedRequest>>>,
     completed: Arc<Mutex<Vec<&'static str>>>,
     handle: JoinHandle<()>,
+    parser: support::parser::ParserHarness,
 }
+
+mod support;
 
 impl Drop for MockVllm {
     fn drop(&mut self) {
@@ -63,6 +66,7 @@ impl Drop for MockVllm {
 }
 
 async fn mock_vllm(behavior: MockBehavior) -> MockVllm {
+    let parser = support::parser::ParserHarness::start().await;
     let requests = Arc::new(Mutex::new(Vec::new()));
     let completed = Arc::new(Mutex::new(Vec::new()));
     let captured = requests.clone();
@@ -138,6 +142,7 @@ async fn mock_vllm(behavior: MockBehavior) -> MockVllm {
         requests,
         completed,
         handle,
+        parser,
     }
 }
 
@@ -227,6 +232,7 @@ fn settings(server: &MockVllm, detector: &FakeDetector) -> Settings {
         recovery_expansion_pixels: 16,
         recognize_image_regions: false,
         pdf_render_timeout_seconds: 30,
+        parser_socket_path: server.parser.socket_path(),
         max_output_tokens: 8192,
         retention_days: 7,
     }

@@ -1,6 +1,6 @@
 # A06a — Giám sát native subprocess và vòng đời scratch
 
-Ngày 15/10/2026. **A06a IMPLEMENTED / VERIFIED LOCAL + Linux ARM64. A06b parser isolation chưa triển khai.** Phiên này kết thúc theo yêu cầu tạm dừng của người dùng; không chuyển sang A06b/O01. Không đổi bốn container live, native Qwen, credentials, W/R hoặc layout pool đang chạy.
+Ngày 15/10/2026. **A06a IMPLEMENTED / VERIFIED LOCAL + Linux ARM64. A06b parser isolation và O01 observer được hoàn tất sau đó; xem [follow-up trace](a06b-execution-trace.md).** Tài liệu này giữ bằng chứng/lịch sử riêng của A06a. Không đổi bốn container live, native Qwen, credentials, W/R hoặc layout pool đang chạy trong lần kiểm A06a.
 
 ## Kết quả đã kiểm
 
@@ -52,12 +52,10 @@ Development history được giữ ở ignored `artifacts/a06a-verification/logs
 
 Tests mới dùng synthetic credentials/processes, stdout/stderr floods, queued timeout/cancel, parent exit giữ descendant, caller drop, actual child environment, same-group descendant termination, direct-child ECHILD, scratch cleanup, next request và cancelled shutdown barrier. Geometry/EXIF/alpha/JPEG/course golden tests trước đó vẫn qua. Kết quả không phải penetration test hoặc proof rằng kernel không thể giữ process ở D-state.
 
-## Gate A06b và việc chưa làm
+## Follow-up A06b/O01 and remaining gates
 
-A06a không phải parser sandbox. Poppler, ONNX helper và Rust image decoders vẫn dùng UID/filesystem/network của worker. Process group có thể bị `setsid`/`setpgid` escape; SIGKILL thành công không chứng minh mọi descendant đã được reap. Runtime death, OOM, uninterruptible kernel I/O cần container/init boundary. Started blocking work không thể bị abort an toàn chỉ bằng hủy async waiter; [Tokio documentation](https://docs.rs/tokio/latest/tokio/task/fn.spawn_blocking.html) mô tả giới hạn này.
+A06a remains subprocess hygiene, not a sandbox; its local process-group guarantees still do not contain kernel-level failure or escaped process groups. A06b subsequently moved Poppler and compressed-image decoding into a persistent parser container with bounded Unix IPC, no network, a separate UID, read-only root, init/reaping, and CPU/RAM/PID/scratch limits. Synthetic IPC/parity, restart, ENOSPC, OOM, and next-job recovery evidence is recorded in the [A06b/O01 trace](a06b-execution-trace.md). Compose demo/smoke overrides now preserve the parser socket mount.
 
-Lần tiếp tục cần persistent Rust renderer container, `network_mode: none`, không secrets/DB/model credentials hoặc Docker socket, read-only root, riêng CPU/RAM/PID/scratch, init/reaping và bounded versioned Unix IPC. Đưa Poppler/native parsing và compressed image decode qua boundary; trả raw RGB với exact checked dimensions/length. Production fail-closed khi helper unavailable. [Docker Compose service controls](https://docs.docker.com/reference/compose-file/services/) cung cấp các cấu hình isolation/resource; [Docker tmpfs documentation](https://docs.docker.com/engine/storage/tmpfs/) nhắc tmpfs tính vào memory cgroup và có thể swap, nên không hứa plaintext không bao giờ xuống disk.
-
-Còn phải thử malformed/oversized/truncated IPC, disconnect/cancel/timeout, scratch ENOSPC/OOM/restart, denied egress, mount/env sentinel và next-good-job recovery. Hai override demo/smoke hiện có `volumes: !reset []` phải được xử lý để không làm mất socket mount. Đo IPC overhead/headroom, không tăng W/R từ test này. Chưa chạy các gate A06b này, chưa đổi live model hoặc tái OCR PDF riêng tư, chưa có independent labels/calibration/capacity/reviewer identity/O01.
+O01 subsequently added a cached worker-only PostgreSQL/Redis operational snapshot; see [observability](observability.md). Neither milestone is penetration-tested or production-certified. The ONNX layout helper remains worker-local; IPC overhead/headroom and broader egress/mount-sentinel review remain open. No live model was changed and no private PDF was reprocessed. Independent labels/calibration, capacity, reviewer identity, alert thresholds, production backup/RPO/RTO, release rollback, and live adoption remain gated.
 
 Máy record: [a06a-verification-2026-10-15.json](research/a06a-verification-2026-10-15.json). Raw logs/source hashes và stack sample nằm trong ignored private evidence directory; không đưa document text hay real credentials vào report.

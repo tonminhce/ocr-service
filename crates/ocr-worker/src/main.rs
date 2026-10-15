@@ -2,7 +2,7 @@ use ocr_core::{
     metrics::{MetricsEndpoint, process_metrics},
     store::Store,
 };
-use ocr_worker::{settings::Settings, worker};
+use ocr_worker::{queue::RedisQueue, settings::Settings, worker};
 use tokio_util::sync::CancellationToken;
 
 #[tokio::main]
@@ -15,11 +15,21 @@ async fn main() -> anyhow::Result<()> {
         .init();
     let _ = process_metrics();
     let settings = Settings::from_env()?;
+    ocr_worker::parser_client::health_check(
+        &settings.parser_socket_path,
+        std::time::Duration::from_secs(2),
+    )
+    .await?;
     let store = Store::connect(&settings.database_url).await?;
     store.check_schema().await?;
     store.health().await?;
     let shutdown = CancellationToken::new();
     let endpoint = MetricsEndpoint::from_env("WORKER_METRICS_BIND_ADDR").await?;
+    let observer = ocr_worker::observer::spawn(
+        store.clone(),
+        RedisQueue::new(&settings).map_err(|_| anyhow::anyhow!("Redis observer setup failed"))?,
+        shutdown.clone(),
+    );
     let metrics_task = endpoint.map(|endpoint| {
         let stop = shutdown.clone();
         tracing::info!(address = %endpoint.local_addr().expect("bound metrics socket"), "worker metrics listening");
@@ -36,6 +46,7 @@ async fn main() -> anyhow::Result<()> {
     });
     let result = worker::run(store, settings, shutdown.clone()).await;
     shutdown.cancel();
+    observer.await?;
     if let Some(task) = metrics_task {
         task.await??;
     }

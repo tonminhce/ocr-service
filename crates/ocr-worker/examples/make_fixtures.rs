@@ -2,10 +2,27 @@
 use std::{io::Write, path::PathBuf};
 
 fn main() -> anyhow::Result<()> {
-    let directory = std::env::args_os()
-        .nth(1)
+    let mut arguments = std::env::args_os().skip(1);
+    let directory = arguments
+        .next()
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("fixtures"));
+    let stress_edge = match (arguments.next(), arguments.next(), arguments.next()) {
+        (None, None, None) => None,
+        (Some(flag), Some(edge), None) if flag == "--parser-memory-stress-edge" => {
+            let edge = edge
+                .to_str()
+                .and_then(|value| value.parse::<u32>().ok())
+                .ok_or_else(|| anyhow::anyhow!("stress image edge must be an integer"))?;
+            let pixels = u64::from(edge) * u64::from(edge);
+            anyhow::ensure!(
+                (32..=6324).contains(&edge) && pixels <= 40_000_000,
+                "stress image must be between 32 and 6324 pixels per edge"
+            );
+            Some(edge)
+        }
+        _ => anyhow::bail!("usage: make-fixtures [DIRECTORY] [--parser-memory-stress-edge PIXELS]"),
+    };
     std::fs::create_dir_all(&directory)?;
     let mut image = image::RgbImage::from_pixel(720, 160, image::Rgb([255; 3]));
     let text = "OCR TEST 123";
@@ -29,6 +46,12 @@ fn main() -> anyhow::Result<()> {
     }
     image.save(directory.join("fixture.png"))?;
     std::fs::write(directory.join("fixture.pdf"), pdf_fixture()?)?;
+    if let Some(edge) = stress_edge {
+        // A uniform image compresses to a small upload while exercising the
+        // decoder's dimension-derived allocation ceiling.
+        image::RgbaImage::from_pixel(edge, edge, image::Rgba([255; 4]))
+            .save(directory.join("parser-memory-stress.png"))?;
+    }
     println!(
         "Created {} and {}",
         directory.join("fixture.png").display(),

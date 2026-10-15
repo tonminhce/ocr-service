@@ -136,9 +136,21 @@ impl Recognizer {
             "region_concurrency":self.settings.region_concurrency,
             "layout_pool_size":self.settings.layout_pool_size,
             "document_process_policy": {
-                "revision":"unix-supervision-v1",
-                "execution_boundary":"worker_local_not_sandboxed",
-                "poppler_process_slots":1,"scratch_write_slots":1,
+                "revision":"isolated-parser-ipc-v1",
+                "parser": {
+                    "protocol_version":1,
+                    "transport":"bounded_unix_socket",
+                    "execution_boundary":"parser_container_required",
+                    "isolation_attestation":"not_attested_by_worker",
+                    "fails_closed_when_unavailable":true,
+                    "max_sessions_per_container":2,
+                    "decode_slots_per_container":1,
+                    "request_data_limit_bytes":67108864,
+                    "response_data_limit_bytes":134217728,
+                    "container_resource_limits":"operator_configured_unverified"
+                },
+                "layout_helper_execution_boundary":"worker_local_not_sandboxed",
+                "parser_poppler_process_slots":1,"parser_scratch_write_slots":1,
                 "stdout_limit_bytes":262144,"stderr_limit_bytes":262144,
                 "child_environment":"fixed_allowlist_with_explicit_layout_ort_library"
             },
@@ -182,15 +194,18 @@ impl Recognizer {
         if profile != "vi_rental_contract_v1" {
             return Err(ProcessingError::permanent("unsupported extraction profile"));
         }
+        let document = self
+            .open_document(input, media_type, cancelled.clone())
+            .await?;
         let mut result = self
-            .recognize(input.clone(), media_type, cancelled.clone())
+            .recognize_document(&document, cancelled.clone())
             .await?;
         crate::post_processing::apply(
             &mut result,
-            &input,
             media_type,
             profile,
-            self.settings.pdf_render_timeout_seconds,
+            Some(document.parser.clone()),
+            document.parser.source_sha256().to_owned(),
             cancelled,
         )
         .await?;
@@ -203,19 +218,30 @@ impl Recognizer {
         media_type: &str,
         cancelled: CancellationToken,
     ) -> Result<Value, ProcessingError> {
+        let document = self
+            .open_document(input, media_type, cancelled.clone())
+            .await?;
+        self.recognize_document(&document, cancelled).await
+    }
+
+    async fn open_document(
+        &self,
+        input: Vec<u8>,
+        media_type: &str,
+        cancelled: CancellationToken,
+    ) -> Result<preparation::Document, ProcessingError> {
+        let _timer = process_metrics().timer(Stage::Inspect);
+        preparation::inspect_with_cancellation(input, media_type, &self.settings, cancelled).await
+    }
+
+    async fn recognize_document(
+        &self,
+        document: &preparation::Document,
+        cancelled: CancellationToken,
+    ) -> Result<Value, ProcessingError> {
         if self.settings.strategy == OcrStrategy::CourseLayout {
-            return self.recognize_layout(input, media_type, cancelled).await;
+            return self.recognize_layout(document, cancelled).await;
         }
-        let document = {
-            let _timer = process_metrics().timer(Stage::Inspect);
-            preparation::inspect_with_cancellation(
-                input,
-                media_type,
-                &self.settings,
-                cancelled.clone(),
-            )
-            .await?
-        };
         let mut pages = Vec::with_capacity(document.page_count() as usize);
         let mut content_bytes = 0_usize;
         for page_number in 1..=document.page_count() {
@@ -224,7 +250,7 @@ impl Recognizer {
             }
             let render_timer = process_metrics().timer(Stage::Render);
             let jpeg = preparation::prepare_page(
-                &document,
+                document,
                 page_number,
                 &self.settings,
                 self.decode_slots.clone(),
@@ -276,20 +302,9 @@ impl Recognizer {
 
     async fn recognize_layout(
         &self,
-        input: Vec<u8>,
-        media_type: &str,
+        document: &preparation::Document,
         cancelled: CancellationToken,
     ) -> Result<Value, ProcessingError> {
-        let document = {
-            let _timer = process_metrics().timer(Stage::Inspect);
-            preparation::inspect_with_cancellation(
-                input,
-                media_type,
-                &self.settings,
-                cancelled.clone(),
-            )
-            .await?
-        };
         let mut grouped = Vec::new();
         let mut metadata = Vec::new();
         let mut layout_budget = LayoutBudget::new(self.settings.max_regions_per_document);
@@ -302,14 +317,7 @@ impl Recognizer {
             }
             let render_timer = process_metrics().timer(Stage::Render);
             let page = Arc::new(
-                preparation::prepare_rgb_page(
-                    &document,
-                    page_number,
-                    &self.settings,
-                    self.decode_slots.clone(),
-                    cancelled.clone(),
-                )
-                .await?,
+                preparation::prepare_rgb_page(document, page_number, cancelled.clone()).await?,
             );
             drop(render_timer);
             let layout_timer = process_metrics().timer(Stage::Layout);

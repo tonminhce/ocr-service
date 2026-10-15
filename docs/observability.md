@@ -1,6 +1,6 @@
 # Pipeline observability
 
-The API and Rust worker export Prometheus text format on **separate, opt-in listeners**. Recording observations uses fixed-size atomics and enum dimensions; it does not perform database queries, log document contents, or allocate a label map for each region. Each process has its own registry. Counters reset when that process restarts, so dashboards must use `rate`/`increase` and preserve Prometheus target labels.
+The API and Rust worker export Prometheus text format on **separate, opt-in listeners**. Process observations use fixed-size atomics and enum dimensions; the worker's O01 operational snapshot is a short-held cached value. Scrapes never query PostgreSQL or Redis, log document contents, or allocate a label map for each region. Each process has its own registry. Counters reset when that process restarts, so dashboards must use `rate`/`increase` and preserve Prometheus target labels.
 
 ## Configuration
 
@@ -51,6 +51,19 @@ Targets running inside a separate Prometheus container need the actual Docker se
 | `ocr_model_usage_total` | `state` | Server token usage `present`, `missing`, or `invalid` |
 | `ocr_model_tokens_total` | `kind` | Genuine reported prompt/completion/total tokens, independently summed |
 | `ocr_model_token_observations_total` | `kind` | Denominator for each reported token component |
+| `ocr_operational_jobs` | `state` | Worker snapshot of queued, processing and failed-in-last-24-hours PostgreSQL jobs |
+| `ocr_operational_eligible_jobs` / `ocr_operational_delayed_jobs` | none | Queued jobs due now versus waiting for `available_at` |
+| `ocr_operational_oldest_queued_seconds` | none | Age of the oldest queued job |
+| `ocr_operational_seconds_since_last_progress` | none | Age of the most recent `updated_at` among processing jobs |
+| `ocr_operational_due_outbox_jobs` / `ocr_operational_oldest_due_outbox_seconds` | none | Dispatcher-claimable outbox count/age: queued-and-eligible or processing-with-expired-worker-lease; active dispatch leases are excluded |
+| `ocr_operational_expired_leases` | none | Processing jobs whose PostgreSQL lease has expired |
+| `ocr_operational_redis_pending_entries` / `ocr_operational_redis_memory_bytes` | none | Redis Stream PEL size and Redis-reported used memory |
+| `ocr_operational_collector_last_success_timestamp_seconds` | none | Unix timestamp of the last complete PostgreSQL + Redis snapshot; zero means none yet |
+| `ocr_operational_collector_error` | none | `1` when the most recent snapshot failed; cached last-good values remain visible |
+
+Operational series are enabled only by the worker collector. It samples immediately at startup and then every 30 seconds. PostgreSQL uses one aggregate query with a 3-second deadline; PostgreSQL and Redis collection together has a 5-second deadline. Redis calls use the configured Redis command timeout. A partial sample is never published: failure preserves the previous values, updates the collector-error gauge, and leaves the last-success timestamp unchanged. Restart resets this process-local cache. These are observations, not durable queue state.
+
+The current snapshot intentionally excludes PostgreSQL pool saturation/storage, host CPU/RSS, Redis eviction rates, and inference-server health. The API exporter remains process-only. Query cardinality is fixed; labels contain only the three fixed job states. No threshold is asserted by the implementation.
 
 Stages are `queue_wait`, `document`, `inspect`, `render`, `layout`, `layout_queue`, `layout_startup`, `layout_encode`, `layout_inference`, `crop`, `model_queue`, `model`, `format`, `postprocess`, `native_text`, `extraction`, `validation`, and `persistence`. Instrumented stages have counts greater than zero; stages unused by a strategy remain zero. Histograms cover 1 ms through 600 s plus `+Inf`; times are seconds in exposition. Nested stage measurements overlap: adding all stage sums does not yield document duration. Stage timers measure wall time and may include waiting for capacity; `model_queue` specifically separates waiting for a local model permit from an HTTP model attempt. A cancelled or failed timer remains a timing observation, not a success count. Layout substage observations are emitted for successful detector replies; overall `layout` also covers failed/cancelled attempts. Warm requests have zero startup duration.
 
@@ -150,10 +163,22 @@ sum(rate(ocr_events_total{event=~"region_cache_hit|region_cache_miss"}[10m]))
 
 Alert on missing scrape targets, sustained lease renewal/commit failures, retries, model errors, Redis read/outbox/ack errors, and growing latency. Set thresholds after a representative load run; an arbitrary p95 target has no evidence yet. Benchmark document and region concurrency separately with a fixed corpus, tracking throughput, p50/p95, failure rate, resident memory, and model utilization. A higher throughput accompanied by more errors or worse required tail latency is not a successful optimization.
 
-This registry deliberately does not query PostgreSQL or Redis during scrapes. To detect a backlog when **no job is claimed**, monitor PostgreSQL queue count/oldest eligible job and outbox age with an independent exporter or a low-frequency bounded collector. Also monitor Redis pending entries and memory/evictions, PostgreSQL pool/query latency, host CPU/RSS, and the inference backend's own metrics. These are distinct from application timings and are not fabricated here. Native Metal and GPU vLLM backends must be benchmarked independently; available metrics can differ.
+The O01 worker gauges detect a backlog even when **no job is claimed**. For example, sustained oldest-queued age with eligible work and no increase in completed attempts distinguishes processing blockage from intake. A nonzero `ocr_operational_collector_error` or an old `ocr_operational_collector_last_success_timestamp_seconds` means the snapshot itself is unavailable; do not interpret retained values as fresh.
+
+Example starting expressions (thresholds and windows require deployment-specific calibration):
+
+```promql
+ocr_operational_oldest_queued_seconds
+ocr_operational_due_outbox_jobs
+ocr_operational_expired_leases
+time() - ocr_operational_collector_last_success_timestamp_seconds
+ocr_operational_collector_error
+```
+
+Also monitor PostgreSQL pool/query latency and storage, Redis evictions, host CPU/RSS, and the inference backend's own metrics. These are not exported by O01 and are not fabricated from application timings. Native Metal and GPU vLLM backends must be benchmarked independently; available metrics can differ.
 
 ## Verification and sources
 
-Tests construct isolated registries and cover exact histogram boundaries/sums, simultaneous four-thread observations, fixed route classification, cancellation guards, fail-closed listener configuration, bearer authentication and graceful endpoint shutdown. No test relies on shared global counter values.
+Tests construct isolated registries and cover exact histogram boundaries/sums, simultaneous four-thread observations, fixed route classification, cancellation guards, fail-closed listener configuration, bearer authentication, graceful endpoint shutdown, fixed-cardinality operational rendering and last-good snapshot retention. Disposable PostgreSQL/Redis integration tests exercise the real queue/lease/outbox aggregates, pending-entry count and memory query. No test relies on shared global counter values.
 
 The design follows Prometheus guidance on [bounded instrumentation](https://prometheus.io/docs/practices/instrumentation/), [metric and label naming](https://prometheus.io/docs/practices/naming/) and [text exposition](https://prometheus.io/docs/instrumenting/exposition_formats/). [Histogram quantiles](https://prometheus.io/docs/practices/histograms/) are approximations determined by bucket boundaries; they are not calibrated OCR confidence. vLLM's [engine metrics](https://docs.vllm.ai/en/latest/usage/metrics/) provide model-server measurements separately from Rust client timings.

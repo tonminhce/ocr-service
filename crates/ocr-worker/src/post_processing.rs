@@ -13,7 +13,7 @@ use sha2::{Digest, Sha256};
 use tokio::sync::Semaphore;
 use tokio_util::sync::CancellationToken;
 
-use crate::{ProcessingError, preparation, subprocess_policy::PdfTool};
+use crate::ProcessingError;
 
 const MAX_BLOCKS: usize = 10_000;
 const MAX_TEXT_BYTES: usize = 4 * 1024 * 1024;
@@ -25,10 +25,10 @@ const POPPLER_DOCTYPE: &str = "<!DOCTYPE html PUBLIC \"-//W3C//DTD XHTML 1.0 Tra
 /// Extraction quality never changes the execution status into business approval.
 pub async fn apply(
     result: &mut Value,
-    input: &[u8],
     media_type: &str,
     profile: &str,
-    timeout_seconds: u64,
+    parser: Option<Arc<crate::parser_client::ParserSession>>,
+    source_sha256: String,
     cancelled: CancellationToken,
 ) -> Result<(), ProcessingError> {
     if profile == "none" {
@@ -43,10 +43,17 @@ pub async fn apply(
     let recovery = recovery_context_blocks(result)?;
     let mut issues = Vec::new();
     let native = if media_type == "application/pdf" {
-        match native_pdf_blocks(input, timeout_seconds, cancelled.clone()).await {
+        let _timer = process_metrics().timer(Stage::NativeText);
+        match match parser {
+            Some(parser) => parser.native_text(cancelled.clone()).await,
+            None => Err(ProcessingError::transient("isolated parser is unavailable")),
+        } {
             Ok(blocks) => blocks,
             Err(error) => {
                 if cancelled.is_cancelled() {
+                    return Err(error);
+                }
+                if error.retryable {
                     return Err(error);
                 }
                 // A PDF text layer is optional. Its absence/failure must remain
@@ -64,7 +71,6 @@ pub async fn apply(
         permit=PROCESSING_SLOTS.clone().acquire_owned()=>permit.map_err(|_|ProcessingError::transient("post-processing is stopping"))?,
     };
     let stopped = cancelled.clone();
-    let original = input.to_vec();
     let profile = profile.to_owned();
     let mut complete = std::mem::take(result);
     let complete = tokio::task::spawn_blocking(move || {
@@ -77,7 +83,7 @@ pub async fn apply(
                 recovery,
             },
             &profile,
-            &original,
+            source_sha256,
             issues,
             &stopped,
         )?;
@@ -112,7 +118,7 @@ struct SourceInputs {
 fn make_output(
     sources: SourceInputs,
     profile: &str,
-    input: &[u8],
+    source_sha256: String,
     issues: Vec<Value>,
     cancelled: &CancellationToken,
 ) -> Result<(Value, Value), ProcessingError> {
@@ -166,7 +172,7 @@ fn make_output(
     let native_comparison = compare_sources(&ocr, &native);
     let post_processing = json!({
         "version":"evidence-postprocess-v1", "profile":profile,
-        "original_sha256":format!("{:x}",Sha256::digest(input)),
+        "original_sha256":source_sha256,
         "native_pdf":{"selection_policy":NATIVE_POLICY,
             "minimum_bidirectional_token_agreement":0.65,
             "minimum_native_token_count":10,
@@ -332,61 +338,13 @@ fn recovery_context_blocks(result: &Value) -> Result<Vec<SourceBlock>, Processin
     Ok(blocks)
 }
 
-/// Poppler receives only local bytes. No shell, remote fetch, or external entity
-/// resolution. Its stdout/stderr, lifetime and temporary directory are bounded.
-async fn native_pdf_blocks(
-    input: &[u8],
-    timeout_seconds: u64,
-    cancelled: CancellationToken,
-) -> Result<Vec<SourceBlock>, ProcessingError> {
-    let _timer = process_metrics().timer(Stage::NativeText);
-    if cancelled.is_cancelled() {
-        return Err(ProcessingError::transient("job processing cancelled"));
-    }
-    let directory = crate::subprocess_policy::scratch_directory()?;
-    let path = directory.path().join("document.pdf");
-    preparation::write_scratch_input(
-        directory.clone(),
-        path.clone(),
-        input.to_vec(),
-        timeout_seconds,
-        cancelled.clone(),
-    )
-    .await?;
-    let command = PdfTool::Text { input: &path }.command(directory.path())?;
-    // The shared runner caps each pipe at 256 KiB. Large native layers fall
-    // back to OCR with an explicit unavailable issue, without truncating text.
-    let output = crate::child_process::capture(
-        command,
-        directory,
-        std::time::Duration::from_secs(timeout_seconds),
-        cancelled.clone(),
-    )
-    .await?;
-    let permit = tokio::select! {
-        _ = cancelled.cancelled() => return Err(ProcessingError::transient("native parsing cancelled")),
-        permit = PROCESSING_SLOTS.clone().acquire_owned() => permit.map_err(|_|ProcessingError::transient("post-processing is stopping"))?,
-    };
-    tokio::task::spawn_blocking(move || {
-        let _permit = permit;
-        if cancelled.is_cancelled() {
-            return Err(ProcessingError::transient("native parsing cancelled"));
-        }
-        let xml = std::str::from_utf8(&output)
-            .map_err(|_| ProcessingError::permanent("native PDF text is not UTF-8"))?;
-        parse_native_xml(xml)
-    })
-    .await
-    .map_err(|_| ProcessingError::transient("native parsing task failed"))?
-}
-
 #[derive(Clone)]
 struct Line {
     text: String,
     bbox: [i32; 4],
 }
 
-fn parse_native_xml(xml: &str) -> Result<Vec<SourceBlock>, ProcessingError> {
+pub(crate) fn parse_native_xml(xml: &str) -> Result<Vec<SourceBlock>, ProcessingError> {
     // Poppler's fixed external XHTML declaration has no internal subset. Drop
     // that exact declaration; all other DTD/entity declarations stay rejected.
     let xml = xml.strip_prefix(POPPLER_DOCTYPE).unwrap_or(xml);
@@ -718,10 +676,10 @@ mod tests {
         let original = result.clone();
         apply(
             &mut result,
-            b"image",
             "image/png",
             "vi_rental_contract_v1",
-            1,
+            None,
+            "a".repeat(64),
             CancellationToken::new(),
         )
         .await
@@ -737,14 +695,31 @@ mod tests {
         assert!(
             apply(
                 &mut result,
-                b"image",
                 "image/png",
                 "invented",
-                1,
+                None,
+                "a".repeat(64),
                 CancellationToken::new()
             )
             .await
             .is_err()
         );
+    }
+
+    #[tokio::test]
+    async fn missing_pdf_parser_is_retryable_not_a_success_warning() {
+        let mut result = json!({"pages": []});
+        let error = apply(
+            &mut result,
+            "application/pdf",
+            "vi_rental_contract_v1",
+            None,
+            "a".repeat(64),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap_err();
+        assert!(error.retryable);
+        assert_eq!(error.message, "isolated parser is unavailable");
     }
 }

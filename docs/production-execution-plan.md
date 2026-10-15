@@ -1,6 +1,6 @@
 # Kế hoạch thực thi chi tiết: Rust OCR production và capacity
 
-Ngày 15/10/2026 — **M1 verified local; A03/A04 verified isolated; A05 logical restore verified local; A06a subprocess verified Mac/Linux; E02 audit/observer verified; A06b isolation và các gate còn lại giữ riêng**.
+Ngày 15/10/2026 — **M1 verified local; A03/A04 verified isolated; A05 logical restore verified local; A06a subprocess verified Mac/Linux; A06b parser isolation + O01 bounded observer verified isolated; production adoption và các gate chất lượng/năng lực còn riêng**.
 
 Tài liệu chuyển [roadmap nghiên cứu](production-next-roadmap.md) thành các gói thực thi có phụ thuộc, code liên quan, kiểm thử và điều kiện phát hành. Đợt đầu P00/A01/A02/B01/B02/E01 có kết quả trong [M1 execution review](m1-execution-review.md). A03 và A04 đã kiểm trên DB/volumes mới trong [A03 execution trace](a03-execution-trace.md) và [A04 execution trace](a04-execution-trace.md); [E02 memory audit](e02-memory-audit.md) đã xác định retained process và kiểm observer. Live M1 chưa cut over; retention apply, đổi model và concurrency sweep chưa thực hiện. Những gói không được đánh dấu thực thi bên dưới vẫn là kế hoạch.
 
@@ -16,7 +16,9 @@ Tài liệu chuyển [roadmap nghiên cứu](production-next-roadmap.md) thành 
 | A04 | IMPLEMENTED / VERIFIED ISOLATED: 209 ordinary +78 explicit integration tests toàn workspace; 11 retention race/guard tests và packaged Docker hold→completion→release qua. [Trace](a04-execution-trace.md). Policy/apply/live cutover vẫn chưa thực hiện |
 | A05 | IMPLEMENTED / VERIFIED LOCAL ISOLATED: Rust PG18/age tooling, 227 ordinary +86 explicit integration; Linux17 binary tests; two full restores and empty-Redis worker recovery. [Trace](a05-execution-trace.md). Off-host/PITR/RPO/RTO/deletion reconciliation/live activation remain gated |
 | A06a | IMPLEMENTED / VERIFIED:240 ordinary +86 explicit integration trên Mac;86 Linux ARM64 release tests. [Trace](a06a-execution-trace.md). Env/commands/process-group/scratch/shutdown hygiene; chưa phải parser sandbox |
-| A06b/O/C/D/E03–E04/F/G | PLANNED; A06b real isolated renderer/IPC chưa triển khai. Goal tạm dừng sau A06a theo yêu cầu người dùng; không tự chuyển trạng thái nhờ tests của gói khác |
+| A06b | IMPLEMENTED / VERIFIED ISOLATED: versioned Unix IPC, parser-only Poppler/decode container, synthetic parity, egress/resource/socket checks, ENOSPC/OOM/restart/recovery. [Trace](a06b-execution-trace.md). Không phải penetration test hoặc production cutover |
+| O01 | IMPLEMENTED / VERIFIED ISOLATED: cached 30-second PostgreSQL/Redis snapshots with bounded query budget, fixed non-PII gauges, freshness/error. [Trace](a06b-execution-trace.md), [metrics contract](observability.md). Alert thresholds, pool/storage/model health and production dashboards remain open |
+| O02/C/D/E03–E04/F/G | PLANNED or WAITING_FOR_DATA; independent labels, calibrated acceptance, release/rollback, alert policy and measured capacity remain gated |
 
 ## 1. Mục tiêu và ràng buộc đã chốt
 
@@ -130,19 +132,20 @@ completion đã qua tests. Policy không tự suy từ `RETENTION_DAYS`; apply l
 
 ### A06 — Parser/renderer isolation
 
-**A06a đã kiểm trên Mac + Linux ARM64:** [trace](a06a-execution-trace.md). Typed Poppler builders, fixed executable resolution/env allowlist, bounded group supervision/capture/admission, scratch lifetime và cancelled-shutdown barrier đã có. **A06b chưa triển khai**; native PDF/image decode vẫn ở worker boundary. Không bật external rollout nhờ A06a. Phiên tạm dừng sau bàn giao theo yêu cầu người dùng; tiếp tục bằng A06b trước O01 khi được yêu cầu resume.
+**A06a đã kiểm trên Mac + Linux ARM64:** [trace](a06a-execution-trace.md). Typed Poppler builders, fixed executable resolution/env allowlist, bounded group supervision/capture/admission, scratch lifetime và cancelled-shutdown barrier đã có. **A06b và O01 đã triển khai, kiểm cô lập:** [A06b/O01 execution trace](a06b-execution-trace.md). Không bật external rollout nhờ các smoke này; operator-configured limits and independent production review remain necessary.
 
-- **Files:** worker `preparation.rs`, native parser path, Docker/ops profile; helper Rust và bounded IPC tests nếu cần tách container.
-- **Hai bước:** trước hết scrub subprocess environment, allowlist executable/args và giữ kill/reap/budgets. Sau đó persistent renderer/helper không network, không DB/model secrets, có riêng CPU/RAM/PID/scratch bounds; không spawn Docker mỗi trang. Đưa Poppler và untrusted decode qua cùng boundary khi có thể.
-- **Tests/gate:** sentinel secret không tới child; malformed/huge PDF, oversized frames/path traversal, cancellation/timeout/OOM không để orphan/scratch leak; next valid job vẫn chạy; overlay/crop/order parity qua. Đo IPC overhead. Env scrub đơn lẻ không được mô tả là sandbox hoàn chỉnh.
-- **Rollback:** engine/render protocol versioned; không bật lại unsandboxed upload path cho dữ liệu không đáng tin cậy chỉ để rollback thuận tiện.
+- **Files:** worker `preparation.rs`, parser protocol/client/service and `parser-renderer`; Docker/Compose parser image, socket and bounded IPC tests. See [A06b trace](a06b-execution-trace.md).
+- **Implemented:** [A06b trace](a06b-execution-trace.md) records the persistent Rust parser, versioned bounded Unix IPC, fail-closed worker client, Poppler + compressed-image decode boundary, RGB/native-text validation, restricted parser container, and Compose socket ownership. Course rendering/cropping/formatting and stored output contract remain unchanged.
+- **Verified:** protocol/client/service tests; packaged two-page synthetic parity; helper restart and next-job recovery; parser scratch ENOSPC; three bounded OOM retries under a temporary 128 MiB cgroup followed by healthy recovery at the original 2 GiB setting. These are isolated synthetic fault tests, not a kernel/container penetration assessment.
+- **Remaining:** measure IPC overhead/headroom under representative workload; test a broader malformed-frame/egress/mount-sentinel matrix; independently review container and host-kernel threat boundaries before external untrusted-document rollout. Layout ONNX helper remains worker-local and explicitly outside A06b.
+- **Rollback:** protocol is versioned and startup fails closed. Do not restore an unsandboxed upload decode path as a convenience rollback.
 
 ### O01/O02 — Observer, alerts và release
 
-- **Files:** `ocr-core/src/metrics.rs`, SQL observer/admin, worker queue/progress signals; protected exporter; `.github/workflows/ci.yml`, Docker build/release docs và ops alerts mới.
-- **Observer:** snapshot cache theo interval; queued/eligible/delayed counts và oldest age, due outbox age, expired leases, last progress, failures, Redis PEL/memory, DB pool/storage và model health; freshness/error của collector riêng. Query không nằm trong request/scrape hot path; interval/query budget được benchmark.
-- **Tests:** dừng worker nhưng vẫn accept một job; model timeout, Redis/PG failure; alert phân biệt intake/processing, backlog drain, backup failure, collector stale. Không PII labels.
-- **Release gate:** immutable image/model/config digests; packaged synthetic E2E; SBOM/dependency scan/provenance; migration compatibility và rollback rehearsal. Baseline CI checks giữ lại; lỗi đã có tests mới không đòi lặp vô hạn mọi checks.
+- **O01 implemented:** `ocr-core/src/metrics.rs`, `ocr-core/src/store.rs`, and worker `queue.rs`/`observer.rs` feed the existing protected exporter. A worker-only background snapshot runs every 30 seconds; one PostgreSQL aggregate query is capped at 3 seconds and PostgreSQL/Redis collection has a 5-second total budget. Request handlers and scrapes read only cached fixed-cardinality gauges.
+- **Current signals:** queued/processing/recent-failed counts, eligible/delayed counts, oldest queued age, age since latest processing update, claimable due-outbox count/age, expired leases, Redis PEL count and Redis-reported used memory. Last-success timestamp and boolean collector-error gauge expose freshness/failure without arbitrary labels. API metrics remain process-only; O01 snapshot series are enabled only by the worker collector.
+- **Verified:** fixed-label/last-good-cache unit coverage plus real disposable PostgreSQL and Redis snapshot tests. Collector failure/staleness is represented; alert routing and threshold calibration are not established. PostgreSQL pool/storage, model-server health and host capacity are not yet exported.
+- **O02 remaining:** immutable release digests/provenance/SBOM scans, alert policy, migration compatibility and rollback rehearsal. No release or production cutover is implied by O01.
 
 ## 7. Luồng B/F00 — Annotation và evaluator trước lựa chọn model
 

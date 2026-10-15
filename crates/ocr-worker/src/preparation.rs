@@ -17,24 +17,16 @@ use tokio::{
 };
 use tokio_util::sync::CancellationToken;
 
-use crate::{ProcessingError, settings::Settings, subprocess_policy::PdfTool};
+use crate::{ProcessingError, settings::Settings};
 
-/// One document owns its temporary directory until every page is processed.
-pub enum Document {
-    Image(Vec<u8>),
-    Pdf {
-        directory: Arc<TempDir>,
-        path: PathBuf,
-        pages: u32,
-    },
+/// The isolated parser owns document bytes and scratch until this session drops.
+pub struct Document {
+    pub(crate) parser: Arc<crate::parser_client::ParserSession>,
 }
 
 impl Document {
     pub fn page_count(&self) -> u32 {
-        match self {
-            Self::Image(_) => 1,
-            Self::Pdf { pages, .. } => *pages,
-        }
+        self.parser.page_count()
     }
 }
 
@@ -55,64 +47,17 @@ pub(crate) async fn inspect_with_cancellation(
     if cancelled.is_cancelled() {
         return Err(ProcessingError::transient("job processing cancelled"));
     }
-    match media_type {
-        "image/png" | "image/jpeg" | "image/webp" => {
-            let actual = image::guess_format(&input)
-                .map_err(|_| ProcessingError::permanent("input is not a supported image"))?;
-            let expected = match media_type {
-                "image/png" => ImageFormat::Png,
-                "image/jpeg" => ImageFormat::Jpeg,
-                _ => ImageFormat::WebP,
-            };
-            if actual != expected {
-                return Err(ProcessingError::permanent(
-                    "image bytes do not match the declared media type",
-                ));
-            }
-            Ok(Document::Image(input))
-        }
-        "application/pdf" => {
-            if !input.starts_with(b"%PDF-") {
-                return Err(ProcessingError::permanent(
-                    "input does not have a PDF header",
-                ));
-            }
-            let directory = crate::subprocess_policy::scratch_directory()?;
-            let path = directory.path().join("document.pdf");
-            write_scratch_input(
-                directory.clone(),
-                path.clone(),
-                input,
-                settings.pdf_render_timeout_seconds,
-                cancelled.clone(),
-            )
-            .await?;
-            let command = PdfTool::Info {
-                input: &path,
-                page: None,
-            }
-            .command(directory.path())?;
-            let output = run_pdf_command(
-                command,
-                directory.clone(),
-                None,
-                settings.pdf_render_timeout_seconds,
-                cancelled,
-            )
-            .await?;
-            let text = std::str::from_utf8(&output)
-                .map_err(|_| ProcessingError::permanent("PDF metadata is not valid UTF-8"))?;
-            let pages = parse_pdf_pages(text, settings.max_pages)?;
-            Ok(Document::Pdf {
-                directory,
-                path,
-                pages,
-            })
-        }
-        _ => Err(ProcessingError::permanent(
-            "supported media types are PDF, PNG, JPEG, and WebP",
-        )),
-    }
+    let parser = crate::parser_client::ParserSession::open(
+        &settings.parser_socket_path,
+        input,
+        media_type,
+        crate::parser_client::ParserLimits::from(settings),
+        cancelled,
+    )
+    .await?;
+    Ok(Document {
+        parser: Arc::new(parser),
+    })
 }
 
 pub fn parse_pdf_pages(output: &str, max_pages: u32) -> Result<u32, ProcessingError> {
@@ -145,64 +90,33 @@ pub fn parse_pdf_pages(output: &str, max_pages: u32) -> Result<u32, ProcessingEr
 pub async fn prepare_page(
     document: &Document,
     page: u32,
-    settings: &Settings,
+    _settings: &Settings,
     decode_slots: Arc<Semaphore>,
     cancelled: CancellationToken,
 ) -> Result<Vec<u8>, ProcessingError> {
     if page == 0 || page > document.page_count() {
         return Err(ProcessingError::permanent("invalid document page number"));
     }
-    let bytes = match document {
-        Document::Image(bytes) => bytes.clone(),
-        Document::Pdf {
-            directory, path, ..
-        } => {
-            let prefix = directory.path().join(format!("page-{page}"));
-            let command = PdfTool::Render {
-                input: path,
-                prefix: &prefix,
-                page,
-                dpi: 144.0,
-                scale_to: Some(settings.max_image_edge),
-                cropbox: false,
-            }
-            .command(directory.path())?;
-            let output_path = prefix.with_extension("png");
-            let raster = Arc::new(ScratchOutput(output_path.clone()));
-            run_pdf_command(
-                command,
-                directory.clone(),
-                Some(raster.clone()),
-                settings.pdf_render_timeout_seconds,
-                cancelled.clone(),
-            )
-            .await?;
-            // The encoded file is bounded independently of decoder allocations.
-            let max_bytes = settings
-                .max_image_pixels
-                .saturating_mul(4)
-                .saturating_add(1_048_576);
-            let bytes = read_file_limited(&output_path, max_bytes).await?;
-            tokio::fs::remove_file(output_path)
-                .await
-                .map_err(|_| ProcessingError::transient("cannot remove rendered page"))?;
-            bytes
-        }
-    };
+    let rgb = document
+        .parser
+        .render_rgb(
+            page,
+            crate::parser_protocol::RenderProfile::FullPage,
+            cancelled.clone(),
+        )
+        .await?;
     let permit = tokio::select! {
         _ = cancelled.cancelled() => return Err(ProcessingError::transient("job processing cancelled")),
         permit = decode_slots.acquire_owned() => permit.map_err(|_| ProcessingError::transient("image processing is stopping"))?,
     };
-    let max_pixels = settings.max_image_pixels;
-    let max_edge = settings.max_image_edge;
     tokio::task::spawn_blocking(move || {
         // Keep the permit inside the blocking closure, even if its async waiter
-        // is cancelled. New work cannot oversubscribe still-running decoders.
+        // is cancelled. The compressed source was decoded in the isolated helper.
         let _permit = permit;
         if cancelled.is_cancelled() {
             return Err(ProcessingError::transient("job processing cancelled"));
         }
-        let result = normalize_image(&bytes, max_pixels, max_edge)?;
+        let result = encode_jpeg(&rgb, 90)?;
         if cancelled.is_cancelled() {
             return Err(ProcessingError::transient("job processing cancelled"));
         }
@@ -218,113 +132,22 @@ pub async fn prepare_page(
 pub async fn prepare_rgb_page(
     document: &Document,
     page: u32,
-    settings: &Settings,
-    decode_slots: Arc<Semaphore>,
     cancelled: CancellationToken,
 ) -> Result<RgbImage, ProcessingError> {
     if page == 0 || page > document.page_count() {
         return Err(ProcessingError::permanent("invalid document page number"));
     }
-    if cancelled.is_cancelled() {
-        return Err(ProcessingError::transient("job processing cancelled"));
-    }
-    let bytes = match document {
-        Document::Image(bytes) => bytes.clone(),
-        Document::Pdf {
-            directory, path, ..
-        } => {
-            // -scale-to always stretches small pages to the limit. Inspect the
-            // physical size instead, then lower the configured DPI only when
-            // the page would otherwise exceed the page edge limit.
-            let metadata = PdfTool::Info {
-                input: path,
-                page: Some(page),
-            }
-            .command(directory.path())?;
-            let output = run_pdf_command(
-                metadata,
-                directory.clone(),
-                None,
-                settings.pdf_render_timeout_seconds,
-                cancelled.clone(),
-            )
-            .await?;
-            let metadata = std::str::from_utf8(&output)
-                .map_err(|_| ProcessingError::permanent("PDF metadata is not valid UTF-8"))?;
-            let (width_points, height_points) = parse_pdf_page_size(metadata, page)?;
-            let dpi = bounded_pdf_dpi(
-                width_points,
-                height_points,
-                settings.pdf_render_dpi,
-                settings.page_max_edge,
-                settings.max_image_pixels,
-            )?;
-            if cancelled.is_cancelled() {
-                return Err(ProcessingError::transient("job processing cancelled"));
-            }
-            let prefix = directory.path().join(format!("course-page-{page}"));
-            let command = PdfTool::Render {
-                input: path,
-                prefix: &prefix,
-                page,
-                dpi,
-                scale_to: None,
-                cropbox: true,
-            }
-            .command(directory.path())?;
-            let output_path = prefix.with_extension("png");
-            let raster = Arc::new(ScratchOutput(output_path.clone()));
-            let rendered = run_pdf_command(
-                command,
-                directory.clone(),
-                Some(raster.clone()),
-                settings.pdf_render_timeout_seconds,
-                cancelled.clone(),
-            )
-            .await;
-            // Cleanup can still be pending after its own bounded wait. Only the
-            // shared guard may unlink a raster until the supervisor releases it.
-            rendered?;
-            if cancelled.is_cancelled() {
-                let _ = tokio::fs::remove_file(&output_path).await;
-                return Err(ProcessingError::transient("job processing cancelled"));
-            }
-            let max_bytes = settings
-                .max_image_pixels
-                .saturating_mul(4)
-                .saturating_add(1_048_576);
-            let result = read_file_limited(&output_path, max_bytes).await;
-            // Remove a rendered file even when its encoded size was rejected.
-            let removed = tokio::fs::remove_file(output_path).await;
-            let bytes = result?;
-            removed.map_err(|_| ProcessingError::transient("cannot remove rendered page"))?;
-            bytes
-        }
-    };
-    let permit = tokio::select! {
-        _ = cancelled.cancelled() => return Err(ProcessingError::transient("job processing cancelled")),
-        permit = decode_slots.acquire_owned() => permit.map_err(|_| ProcessingError::transient("image processing is stopping"))?,
-    };
-    let max_pixels = settings.max_image_pixels;
-    let max_edge = settings.page_max_edge;
-    tokio::task::spawn_blocking(move || {
-        // A cancelled async waiter must not release this slot while decoding
-        // still runs on the blocking pool.
-        let _permit = permit;
-        if cancelled.is_cancelled() {
-            return Err(ProcessingError::transient("job processing cancelled"));
-        }
-        let result = normalize_rgb_image(&bytes, max_pixels, max_edge)?;
-        if cancelled.is_cancelled() {
-            return Err(ProcessingError::transient("job processing cancelled"));
-        }
-        Ok(result)
-    })
-    .await
-    .map_err(|_| ProcessingError::transient("image processing task failed"))?
+    document
+        .parser
+        .render_rgb(
+            page,
+            crate::parser_protocol::RenderProfile::CourseLayout,
+            cancelled,
+        )
+        .await
 }
 
-fn parse_pdf_page_size(output: &str, page: u32) -> Result<(f64, f64), ProcessingError> {
+pub(crate) fn parse_pdf_page_size(output: &str, page: u32) -> Result<(f64, f64), ProcessingError> {
     let value = output.lines().find_map(|line| {
         let (label, value) = line.trim().split_once("size:")?;
         let number = label.strip_prefix("Page")?.trim();
@@ -358,7 +181,7 @@ fn parse_pdf_page_size(output: &str, page: u32) -> Result<(f64, f64), Processing
     Ok((width, height))
 }
 
-fn bounded_pdf_dpi(
+pub(crate) fn bounded_pdf_dpi(
     width_points: f64,
     height_points: f64,
     render_dpi: u32,
@@ -407,7 +230,7 @@ pub fn normalize_image(
     encode_jpeg(&rgb, 90)
 }
 
-fn normalize_rgb_image(
+pub(crate) fn normalize_rgb_image(
     input: &[u8],
     max_pixels: u64,
     max_edge: u32,
@@ -828,7 +651,10 @@ fn apply_polygon_mask(image: &mut RgbImage, vertices: &[[i32; 2]]) {
     }
 }
 
-async fn read_file_limited(path: &Path, max_bytes: u64) -> Result<Vec<u8>, ProcessingError> {
+pub(crate) async fn read_file_limited(
+    path: &Path,
+    max_bytes: u64,
+) -> Result<Vec<u8>, ProcessingError> {
     let file = tokio::fs::File::open(path)
         .await
         .map_err(|_| ProcessingError::transient("cannot open rendered page"))?;
@@ -855,7 +681,12 @@ async fn read_limited(
 
 /// The file guard is shared by caller and supervisor: caller abort cannot
 /// unlink/recreate a partial raster while the process is still running.
-struct ScratchOutput(PathBuf);
+pub(crate) struct ScratchOutput(PathBuf);
+impl ScratchOutput {
+    pub(crate) fn new(path: PathBuf) -> Self {
+        Self(path)
+    }
+}
 impl Drop for ScratchOutput {
     fn drop(&mut self) {
         let _ = std::fs::remove_file(&self.0);
@@ -900,7 +731,7 @@ pub(crate) async fn write_scratch_input(
     }
 }
 
-async fn run_pdf_command(
+pub(crate) async fn run_pdf_command(
     command: Command,
     directory: Arc<TempDir>,
     output: Option<Arc<ScratchOutput>>,
@@ -919,6 +750,7 @@ async fn run_pdf_command(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::subprocess_policy::PdfTool;
 
     #[test]
     fn page_rgb_decode_bounds_dimensions_and_flattens_alpha_to_white() {

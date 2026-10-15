@@ -22,6 +22,7 @@ services:
   redis:
     image: redis:8.2-alpine@sha256:b51665e66f00759be7c3152ad5ac3c66fb2f619c13ef62dea7cc1f9914524635
     restart: unless-stopped
+    stop_grace_period: 20s
     command:
       - sh
       - -c
@@ -52,6 +53,55 @@ services:
       - postgres-data:/var/lib/postgresql
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ocr -d ocr"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  parser-socket-init:
+    image: ocr-service:parser-a06b
+    build:
+      context: .
+      target: parser-runtime
+    entrypoint: ["/bin/sh", "-c"]
+    command: ["chown 0:10001 /run/ocr-parser && chmod 0710 /run/ocr-parser && chown 10002:10001 /run/ocr-parser"]
+    user: "0:0"
+    network_mode: none
+    restart: "no"
+    read_only: true
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: ["ALL"]
+    cap_add: ["CHOWN"]
+    volumes:
+      - parser-socket-data:/run/ocr-parser
+
+  parser:
+    image: ocr-service:parser-a06b
+    build:
+      context: .
+      target: parser-runtime
+    user: "10002:10001"
+    init: true
+    network_mode: none
+    restart: unless-stopped
+    read_only: true
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: ["ALL"]
+    depends_on:
+      parser-socket-init:
+        condition: service_completed_successfully
+    volumes:
+      - parser-socket-data:/run/ocr-parser
+    tmpfs:
+      - /scratch:size=512m,mode=0700,uid=10002,gid=10002,noexec,nosuid,nodev
+    environment:
+      OCR_PARSER_SOCKET_PATH: /run/ocr-parser/parser.sock
+      OCR_PARSER_SCRATCH_DIR: /scratch
+      RUST_LOG: ${RUST_LOG:-warn}
+    cpus: 2
+    mem_limit: 2g
+    pids_limit: 64
+    healthcheck:
+      test: ["CMD", "parser-renderer", "--healthcheck"]
       interval: 2s
       timeout: 3s
       retries: 30
@@ -114,6 +164,8 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+      parser:
+        condition: service_healthy
       migrate:
         condition: service_completed_successfully
     command: ["ocr-worker"]
@@ -131,6 +183,7 @@ services:
         read_only: true
         bind:
           create_host_path: false
+      - parser-socket-data:/run/ocr-parser
     environment:
       <<: *rust-environment
       REDIS_URL: ${COMPOSE_REDIS_URL:-redis://:redis-local@redis:6379/0}
@@ -170,9 +223,11 @@ services:
       OCR_RECOGNIZE_IMAGES: ${OCR_RECOGNIZE_IMAGES:-false}
       TABLE_CROP_PADDING_PIXELS: ${TABLE_CROP_PADDING_PIXELS:-0}
       PDF_RENDER_TIMEOUT_SECONDS: ${PDF_RENDER_TIMEOUT_SECONDS:-30}
+      OCR_PARSER_SOCKET_PATH: /run/ocr-parser/parser.sock
       MAX_OUTPUT_TOKENS: ${MAX_OUTPUT_TOKENS:-8192}
       RETENTION_DAYS: ${RETENTION_DAYS:-7}
 
 volumes:
   postgres-data:
   redis-data:
+  parser-socket-data:

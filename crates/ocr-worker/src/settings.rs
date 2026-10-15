@@ -44,6 +44,7 @@ pub struct Settings {
     pub recovery_expansion_pixels: u32,
     pub recognize_image_regions: bool,
     pub pdf_render_timeout_seconds: u64,
+    pub parser_socket_path: PathBuf,
     pub max_output_tokens: u32,
     pub retention_days: i64,
 }
@@ -118,6 +119,9 @@ impl Settings {
                 .parse()
                 .context("OCR_RECOGNIZE_IMAGES must be true or false")?,
             pdf_render_timeout_seconds: env_number("PDF_RENDER_TIMEOUT_SECONDS", 30)?,
+            parser_socket_path: env::var("OCR_PARSER_SOCKET_PATH")
+                .unwrap_or_else(|_| "/run/ocr-parser/parser.sock".into())
+                .into(),
             max_output_tokens: env_number("MAX_OUTPUT_TOKENS", 8192)?,
             retention_days: env_number("RETENTION_DAYS", 7)?,
         };
@@ -156,6 +160,9 @@ impl Settings {
         }
         if self.database_url.is_empty() || self.vllm_model.trim().is_empty() {
             bail!("DATABASE_URL and VLLM_MODEL cannot be empty");
+        }
+        if !self.parser_socket_path.is_absolute() {
+            bail!("OCR_PARSER_SOCKET_PATH must be an absolute path");
         }
         if !(1..=64).contains(&self.worker_concurrency) {
             bail!("WORKER_CONCURRENCY must be between 1 and 64");
@@ -196,6 +203,7 @@ impl Settings {
         }
         if !(1..=1000).contains(&self.max_pages)
             || !(1..=100_000_000).contains(&self.max_image_pixels)
+            || self.max_image_pixels > crate::parser_protocol::RESPONSE_DATA_LIMIT / 3
             || !(32..=8192).contains(&self.max_image_edge)
             || !(1..=65_536).contains(&self.max_output_tokens)
             || !(1..=3650).contains(&self.retention_days)

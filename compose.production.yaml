@@ -14,6 +14,7 @@ services:
   postgres:
     image: postgres:18
     restart: unless-stopped
+    stop_grace_period: 20s
     environment:
       POSTGRES_DB: ocr
       POSTGRES_USER: ocr_admin
@@ -58,6 +59,55 @@ services:
       OCR_MAINTENANCE_PASSWORD_FILE: /run/secrets/maintenance_password
       OCR_BACKUP_PASSWORD_FILE: /run/secrets/backup_password
     secrets: [admin_database_url, migrator_password, api_password, worker_password, maintenance_password, backup_password]
+
+  parser-socket-init:
+    image: ${PROD_PARSER_IMAGE:-ocr-service:parser-a06b}
+    build:
+      context: .
+      target: parser-runtime
+    entrypoint: ["/bin/sh", "-c"]
+    command: ["chown 0:10001 /run/ocr-parser && chmod 0710 /run/ocr-parser && chown 10002:10001 /run/ocr-parser"]
+    user: "0:0"
+    network_mode: none
+    restart: "no"
+    read_only: true
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: ["ALL"]
+    cap_add: ["CHOWN"]
+    volumes:
+      - parser-socket-data:/run/ocr-parser
+
+  parser:
+    image: ${PROD_PARSER_IMAGE:-ocr-service:parser-a06b}
+    build:
+      context: .
+      target: parser-runtime
+    user: "10002:10001"
+    init: true
+    network_mode: none
+    restart: unless-stopped
+    read_only: true
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: ["ALL"]
+    depends_on:
+      parser-socket-init:
+        condition: service_completed_successfully
+    volumes:
+      - parser-socket-data:/run/ocr-parser
+    tmpfs:
+      - /scratch:size=512m,mode=0700,uid=10002,gid=10002,noexec,nosuid,nodev
+    environment:
+      OCR_PARSER_SOCKET_PATH: /run/ocr-parser/parser.sock
+      OCR_PARSER_SCRATCH_DIR: /scratch
+      RUST_LOG: ${PROD_RUST_LOG:-warn}
+    cpus: 2
+    mem_limit: 2g
+    pids_limit: 64
+    healthcheck:
+      test: ["CMD", "parser-renderer", "--healthcheck"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
 
   migrate:
     <<: *runtime
@@ -112,6 +162,7 @@ services:
     depends_on:
       postgres: {condition: service_healthy}
       redis: {condition: service_healthy}
+      parser: {condition: service_healthy}
       migrate: {condition: service_completed_successfully}
     mem_limit: 2g
     stop_grace_period: 610s
@@ -123,6 +174,7 @@ services:
         target: /models/layout
         read_only: true
         bind: {create_host_path: false}
+      - parser-socket-data:/run/ocr-parser
     environment:
       DATABASE_URL_FILE: /run/secrets/worker_database_url
       REDIS_URL_FILE: /run/secrets/redis_url
@@ -140,6 +192,7 @@ services:
       REGION_CHECKPOINTS_ENABLED: ${PROD_REGION_CHECKPOINTS_ENABLED:-false}
       REGION_RECOVERY_MAX_REGIONS: ${PROD_REGION_RECOVERY_MAX_REGIONS:-0}
       REGION_RECOVERY_EXPANSION_PIXELS: ${PROD_REGION_RECOVERY_EXPANSION_PIXELS:-16}
+      OCR_PARSER_SOCKET_PATH: /run/ocr-parser/parser.sock
       MAX_OUTPUT_TOKENS: ${PROD_MAX_OUTPUT_TOKENS:-2048}
       WORKER_METRICS_BIND_ADDR: 0.0.0.0:9092
       METRICS_BEARER_TOKEN_FILE: /run/secrets/metrics_token
@@ -168,3 +221,4 @@ secrets:
 volumes:
   postgres-data:
   redis-data:
+  parser-socket-data:

@@ -1,0 +1,149 @@
+{
+  "schema_version": "ocr-a06b-o01-verification/1.0.0",
+  "verified_date": "2026-10-15",
+  "status": "a06b_o01_verified_isolated_not_production",
+  "tests": {
+    "format": "passed",
+    "clippy_workspace_all_targets_deny_warnings": "passed",
+    "ordinary_workspace": {
+      "passed": 174,
+      "failed": 0,
+      "ignored": 16
+    },
+    "explicit_ignored_integration": {
+      "passed": 88,
+      "failed": 0,
+      "serial_across_test_binaries_and_threads": true,
+      "updated_active_lease_outbox_fixture_focused_rerun": "passed",
+      "infrastructure": "dedicated compose.verify PostgreSQL and Redis"
+    },
+    "o01_focused": {
+      "postgresql_snapshot_integration": "passed",
+      "live_worker_lease_excluded_from_claimable_outbox": "passed",
+      "redis_pending_and_memory_integration": "passed",
+      "fixed_cardinality_and_last_good_cache_unit": "passed"
+    }
+  },
+  "images": {
+    "parser": {
+      "id": "sha256:55636bb0c8882dd5e54b1e8f1d31de62312bf166117a2147d64c01d9f26eaba3",
+      "platform": "linux/arm64",
+      "runtime": "Poppler present; worker executable absent"
+    },
+    "application": {
+      "id": "sha256:dbae464e2d546e122240438497a8ae7f13275a583f6464b63e192c5f2af60d3c",
+      "platform": "linux/arm64",
+      "runtime": "Poppler absent"
+    }
+  },
+  "parser_boundary": {
+    "protocol": "OCRP v1",
+    "header_bytes": 20,
+    "metadata_limit_bytes": 65536,
+    "request_data_limit_bytes": 67108864,
+    "response_data_limit_bytes": 134217728,
+    "max_sessions": 2,
+    "decode_slots": 1,
+    "container": {
+      "uid_gid": "10002:10001",
+      "network_mode": "none",
+      "read_only_root": true,
+      "memory_bytes": 2147483648,
+      "memory_swap_total_bytes": 4294967296,
+      "cpu_limit": 2,
+      "pids_limit": 64,
+      "scratch_tmpfs_bytes": 536870912,
+      "capabilities_dropped": "ALL",
+      "init": true
+    },
+    "worker_fallback": false,
+    "container_limit_attestation": "operator_configured_unverified"
+  },
+  "packaged_smoke": {
+    "project": "rust-ocr-a06b-smoke",
+    "source_sha256": "5d1cf059ad0f473c987717ffac82eefec7699a148be07cf18de85b3cd4ef675c",
+    "strategy": "full_page_vlm",
+    "page_numbers": [1, 2],
+    "parser_protocol_version": 1,
+    "fails_closed_when_unavailable": true,
+    "jobs_total": 13,
+    "succeeded": 9,
+    "fault_injection_failed": 4,
+    "attempts_total": 21,
+    "outbox_rows": 0,
+    "valid_job_after_faults": "passed"
+  },
+  "fault_injection": {
+    "scratch_enospc": {
+      "synthetic_filler_bytes": 536870912,
+      "client_exit_nonzero": true,
+      "failed_jobs": 2,
+      "subsequent_valid_job_succeeded": true,
+      "filler_removed": true
+    },
+    "decoder_oom": {
+      "synthetic_image": {
+        "width": 6324,
+        "height": 6324,
+        "pixels": 39992976,
+        "compressed_bytes": 790618
+      },
+      "temporary_memory_limit_bytes": 134217728,
+      "temporary_memory_swap_total_bytes": 134217728,
+      "oom_test_runs": 2,
+      "oom_events_per_run": 3,
+      "container_restarts_per_run": 3,
+      "failed_attempts_per_run": 3,
+      "original_limits_restored": true,
+      "parser_healthy_after_restore": true,
+      "subsequent_valid_job_succeeded": true,
+      "repeated_on_final_rebuilt_image": true
+    }
+  },
+  "o01_snapshot": {
+    "scope": "worker exporter only; API exporter remains process-only",
+    "interval_seconds": 30,
+    "postgres_query_deadline_seconds": 3,
+    "total_collection_deadline_seconds": 5,
+    "cached_only_scrape": true,
+    "last_success_timestamp_seconds": 1792088855,
+    "collector_error": 0,
+    "queued_jobs": 0,
+    "processing_jobs": 0,
+    "failed_jobs_24h": 4,
+    "eligible_jobs": 0,
+    "delayed_jobs": 0,
+    "due_outbox_jobs": 0,
+    "expired_leases": 0,
+    "redis_pending_entries": 0,
+    "redis_memory_bytes": 1209928,
+    "not_implemented": [
+      "PostgreSQL pool saturation and storage",
+      "Redis eviction rate",
+      "host CPU/RSS",
+      "model server health",
+      "alert thresholds and routing"
+    ]
+  },
+  "scope": {
+    "live_cutover": false,
+    "live_secrets_changed": false,
+    "private_user_document_reprocessed": false,
+    "real_model_called": false,
+    "accuracy_or_capacity_certified": false,
+    "automatic_acceptance_enabled": false,
+    "layout_helper_isolated": false
+  },
+  "cleanup": {
+    "scratch_filler_removed": true,
+    "disposable_smoke_project_volumes_deleted": false,
+    "disposable_test_services_stopped": true,
+    "live_container_ids_unchanged": true,
+    "pushed": false
+  },
+  "limitations": [
+    "Container settings were inspected locally but not penetration-tested or certified.",
+    "No representative IPC overhead/headroom or 1000-plus-document/day benchmark was run.",
+    "No independent labeled corpus, calibration, production alert thresholds, RPO/RTO decision, reviewer identity, or release rollback rehearsal was established."
+  ]
+}

@@ -2,7 +2,8 @@
 # Combine with standalone compose.production.yaml in a separate project.
 services:
   worker:
-    volumes: !reset []
+    volumes: !override
+      - parser-socket-data:/run/ocr-parser
     environment:
       OCR_STRATEGY: full_page_vlm
       VLLM_BASE_URL: http://mock-vllm:8000/v1

@@ -33,6 +33,7 @@ use sqlx::{
 use tokio::{sync::Notify, task::JoinHandle};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
+mod support;
 
 struct Database {
     admin: PgPool,
@@ -103,6 +104,7 @@ struct Model {
     peak: Arc<AtomicUsize>,
     release: Arc<Notify>,
     handle: JoinHandle<()>,
+    parser: support::parser::ParserHarness,
 }
 impl Drop for Model {
     fn drop(&mut self) {
@@ -116,6 +118,7 @@ impl Model {
         delay_ms: u64,
         block_call: Option<usize>,
     ) -> Self {
+        let parser = support::parser::ParserHarness::start().await;
         let requests = Arc::new(Mutex::new(Vec::new()));
         let captured = requests.clone();
         let active = Arc::new(AtomicUsize::new(0));
@@ -146,6 +149,7 @@ impl Model {
             peak,
             release,
             handle,
+            parser,
         }
     }
     fn calls(&self) -> usize {
@@ -261,6 +265,7 @@ fn settings(model: &Model, detector: &Detector) -> Settings {
         recovery_expansion_pixels: 16,
         recognize_image_regions: false,
         pdf_render_timeout_seconds: 30,
+        parser_socket_path: model.parser.socket_path(),
         max_output_tokens: 1024,
         retention_days: 7,
     }

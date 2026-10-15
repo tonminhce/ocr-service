@@ -13,7 +13,7 @@ use std::{
     future::{Future, IntoFuture},
     net::SocketAddr,
     sync::{
-        OnceLock,
+        Mutex, OnceLock,
         atomic::{AtomicI64, AtomicU64, Ordering},
     },
     time::{Duration, Instant},
@@ -63,6 +63,21 @@ dimension!(ModelFinish {
 });
 dimension!(ModelUsage { Present => "present", Missing => "missing", Invalid => "invalid" });
 dimension!(TokenKind { Prompt => "prompt", Completion => "completion", Total => "total" });
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct OperationalSnapshot {
+    pub queued_jobs: u64,
+    pub processing_jobs: u64,
+    pub failed_jobs_24h: u64,
+    pub eligible_jobs: u64,
+    pub delayed_jobs: u64,
+    pub oldest_queued_seconds: u64,
+    pub seconds_since_last_progress: u64,
+    pub due_outbox_jobs: u64,
+    pub oldest_due_outbox_seconds: u64,
+    pub expired_leases: u64,
+    pub redis_pending_entries: u64,
+    pub redis_memory_bytes: u64,
+}
 dimension!(HttpRoute {
     Submit => "submit", Job => "job", Status => "status", Business => "business",
     Artifact => "artifact", Review => "review", Health => "health", Other => "other",
@@ -174,6 +189,15 @@ pub struct Metrics {
     model_usage: [AtomicU64; ModelUsage::COUNT],
     model_tokens: [AtomicU64; TokenKind::COUNT],
     model_token_observations: [AtomicU64; TokenKind::COUNT],
+    operational: Mutex<OperationalMetrics>,
+}
+
+#[derive(Default)]
+struct OperationalMetrics {
+    snapshot: OperationalSnapshot,
+    last_success_timestamp_seconds: u64,
+    collector_error: bool,
+    enabled: bool,
 }
 impl Default for Metrics {
     fn default() -> Self {
@@ -194,6 +218,7 @@ impl Metrics {
             model_usage: std::array::from_fn(|_| AtomicU64::new(0)),
             model_tokens: std::array::from_fn(|_| AtomicU64::new(0)),
             model_token_observations: std::array::from_fn(|_| AtomicU64::new(0)),
+            operational: Mutex::new(OperationalMetrics::default()),
         }
     }
     pub fn observe(&self, stage: Stage, elapsed: Duration) {
@@ -246,6 +271,30 @@ impl Metrics {
             &self.http_requests[route as usize][HttpStatus::from_status(status) as usize],
             1,
         );
+    }
+    pub fn enable_operational_collector(&self) {
+        self.operational
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .enabled = true;
+    }
+    pub fn operational_snapshot(&self, snapshot: OperationalSnapshot) {
+        let mut operational = self
+            .operational
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        operational.snapshot = snapshot;
+        operational.last_success_timestamp_seconds = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        operational.collector_error = false;
+    }
+    pub fn operational_collector_failed(&self) {
+        self.operational
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .collector_error = true;
     }
     /// No database, network or model calls. All series exist even before first use.
     pub fn render(&self) -> String {
@@ -343,6 +392,87 @@ impl Metrics {
                     self.http_requests[*route as usize][*status as usize].load(Ordering::Relaxed)
                 );
             }
+        }
+        let operational = self
+            .operational
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if operational.enabled {
+            let snapshot = operational.snapshot;
+            output.push_str("# HELP ocr_operational_jobs Durable PostgreSQL job counts from the last background snapshot.\n# TYPE ocr_operational_jobs gauge\n");
+            for (state, count) in [
+                ("queued", snapshot.queued_jobs),
+                ("processing", snapshot.processing_jobs),
+                ("failed_24h", snapshot.failed_jobs_24h),
+            ] {
+                let _ = writeln!(output, "ocr_operational_jobs{{state=\"{state}\"}} {count}");
+            }
+            output.push_str("# HELP ocr_operational_eligible_jobs Queued jobs currently eligible for processing.\n# TYPE ocr_operational_eligible_jobs gauge\n");
+            let _ = writeln!(
+                output,
+                "ocr_operational_eligible_jobs {}",
+                snapshot.eligible_jobs
+            );
+            output.push_str("# HELP ocr_operational_delayed_jobs Queued jobs waiting for their next eligible time.\n# TYPE ocr_operational_delayed_jobs gauge\n");
+            let _ = writeln!(
+                output,
+                "ocr_operational_delayed_jobs {}",
+                snapshot.delayed_jobs
+            );
+            output.push_str("# HELP ocr_operational_oldest_queued_seconds Age of the oldest queued job.\n# TYPE ocr_operational_oldest_queued_seconds gauge\n");
+            let _ = writeln!(
+                output,
+                "ocr_operational_oldest_queued_seconds {}",
+                snapshot.oldest_queued_seconds
+            );
+            output.push_str("# HELP ocr_operational_seconds_since_last_progress Age of the most recent active-job update.\n# TYPE ocr_operational_seconds_since_last_progress gauge\n");
+            let _ = writeln!(
+                output,
+                "ocr_operational_seconds_since_last_progress {}",
+                snapshot.seconds_since_last_progress
+            );
+            output.push_str("# HELP ocr_operational_due_outbox_jobs Durable outbox records currently due for dispatch.\n# TYPE ocr_operational_due_outbox_jobs gauge\n");
+            let _ = writeln!(
+                output,
+                "ocr_operational_due_outbox_jobs {}",
+                snapshot.due_outbox_jobs
+            );
+            output.push_str("# HELP ocr_operational_oldest_due_outbox_seconds Age of the oldest due outbox record.\n# TYPE ocr_operational_oldest_due_outbox_seconds gauge\n");
+            let _ = writeln!(
+                output,
+                "ocr_operational_oldest_due_outbox_seconds {}",
+                snapshot.oldest_due_outbox_seconds
+            );
+            output.push_str("# HELP ocr_operational_expired_leases PostgreSQL worker leases past their expiry time.\n# TYPE ocr_operational_expired_leases gauge\n");
+            let _ = writeln!(
+                output,
+                "ocr_operational_expired_leases {}",
+                snapshot.expired_leases
+            );
+            output.push_str("# HELP ocr_operational_redis_pending_entries Redis Stream pending-entry count.\n# TYPE ocr_operational_redis_pending_entries gauge\n");
+            let _ = writeln!(
+                output,
+                "ocr_operational_redis_pending_entries {}",
+                snapshot.redis_pending_entries
+            );
+            output.push_str("# HELP ocr_operational_redis_memory_bytes Redis-reported used memory.\n# TYPE ocr_operational_redis_memory_bytes gauge\n");
+            let _ = writeln!(
+                output,
+                "ocr_operational_redis_memory_bytes {}",
+                snapshot.redis_memory_bytes
+            );
+            output.push_str("# HELP ocr_operational_collector_last_success_timestamp_seconds Unix time of the last complete background snapshot.\n# TYPE ocr_operational_collector_last_success_timestamp_seconds gauge\n");
+            let _ = writeln!(
+                output,
+                "ocr_operational_collector_last_success_timestamp_seconds {}",
+                operational.last_success_timestamp_seconds
+            );
+            output.push_str("# HELP ocr_operational_collector_error Whether the latest background snapshot failed.\n# TYPE ocr_operational_collector_error gauge\n");
+            let _ = writeln!(
+                output,
+                "ocr_operational_collector_error {}",
+                u8::from(operational.collector_error)
+            );
         }
         output
     }
@@ -541,6 +671,35 @@ mod tests {
         assert!(output.contains("ocr_model_finishes_total{reason=\"other\"} 1\n"));
         assert!(output.contains("ocr_model_usage_total{state=\"missing\"} 1\n"));
         assert!(output.contains("ocr_model_usage_total{state=\"invalid\"} 1\n"));
+    }
+    #[test]
+    fn operational_metrics_are_cached_fixed_cardinality_and_retain_last_good_snapshot() {
+        let metrics = Metrics::new();
+        assert!(!metrics.render().contains("ocr_operational_jobs"));
+        metrics.enable_operational_collector();
+        metrics.operational_snapshot(OperationalSnapshot {
+            queued_jobs: 7,
+            processing_jobs: 2,
+            failed_jobs_24h: 1,
+            eligible_jobs: 5,
+            delayed_jobs: 2,
+            oldest_queued_seconds: 19,
+            seconds_since_last_progress: 3,
+            due_outbox_jobs: 4,
+            oldest_due_outbox_seconds: 8,
+            expired_leases: 1,
+            redis_pending_entries: 6,
+            redis_memory_bytes: 4096,
+        });
+        metrics.operational_collector_failed();
+        let output = metrics.render();
+        assert!(output.contains("ocr_operational_jobs{state=\"queued\"} 7\n"));
+        assert!(output.contains("ocr_operational_eligible_jobs 5\n"));
+        assert!(output.contains("ocr_operational_redis_pending_entries 6\n"));
+        assert!(output.contains("ocr_operational_redis_memory_bytes 4096\n"));
+        assert!(output.contains("ocr_operational_collector_error 1\n"));
+        assert!(output.contains("ocr_operational_collector_last_success_timestamp_seconds "));
+        assert!(!output.contains("job_id"));
     }
     #[test]
     fn histogram_cumulative_buckets_and_sum_are_exact() {

@@ -1,6 +1,10 @@
 //! Replay post-processing against a saved OCR result and its original input.
 //! This runs the real Rust implementation without repeating OCR/model calls.
-use ocr_worker::post_processing;
+use ocr_worker::{
+    parser_client::{ParserLimits, ParserSession},
+    parser_service, post_processing,
+};
+use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
 #[tokio::main]
@@ -17,12 +21,21 @@ async fn main() -> anyhow::Result<()> {
     } else {
         "image/png"
     };
+    let parser = ParserSession::open(
+        &parser_service::socket_path_from_env()?,
+        input,
+        media_type,
+        ParserLimits::default(),
+        CancellationToken::new(),
+    )
+    .await?;
+    let source_sha256 = parser.source_sha256().to_owned();
     post_processing::apply(
         &mut result,
-        &input,
         media_type,
         "vi_rental_contract_v1",
-        30,
+        Some(Arc::new(parser)),
+        source_sha256,
         CancellationToken::new(),
     )
     .await?;
