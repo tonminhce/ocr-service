@@ -1,0 +1,48 @@
+name: Rust checks
+on:
+  push:
+  pull_request:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    services:
+      redis_oom:
+        image: redis:8.2-alpine@sha256:b51665e66f00759be7c3152ad5ac3c66fb2f619c13ef62dea7cc1f9914524635
+        ports: ["6380:6379"]
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 2s --health-timeout 3s --health-retries 30
+      redis:
+        image: redis:8.2-alpine@sha256:b51665e66f00759be7c3152ad5ac3c66fb2f619c13ef62dea7cc1f9914524635
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 2s --health-timeout 3s --health-retries 30
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_DB: ocr_test
+          POSTGRES_USER: ocr
+          POSTGRES_PASSWORD: ocr-test
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U ocr -d ocr_test"
+          --health-interval 2s --health-timeout 3s --health-retries 30
+    env:
+      TEST_DATABASE_URL: postgres://ocr:ocr-test@localhost:5432/ocr_test
+      # CI service is disposable; role/ownership tests create their own DBs.
+      TEST_ADMIN_DATABASE_URL: postgres://ocr:ocr-test@localhost:5432/ocr_test
+      TEST_REDIS_URL: redis://localhost:6379/0
+      TEST_REDIS_OOM_URL: redis://localhost:6380/0
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - name: Install PDF renderer
+        run: sudo apt-get update && sudo apt-get install -y poppler-utils
+      - run: cargo fmt --all -- --check
+      - run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - run: cargo test --workspace --locked
+      - run: cargo test --workspace --locked -- --ignored --test-threads=1

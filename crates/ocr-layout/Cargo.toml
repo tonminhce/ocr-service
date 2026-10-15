@@ -1,0 +1,19 @@
+[package]
+name = "ocr-layout"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license = "Apache-2.0"
+
+[dependencies]
+anyhow.workspace = true
+image.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+imageproc = { version = "0.25", default-features = false }
+ort = { version = "=2.0.0-rc.11", default-features = false, features = ["std", "load-dynamic", "ndarray"] }
+
+[[bin]]
+name = "layout-detect"
+path = "src/main.rs"

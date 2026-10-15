@@ -1,0 +1,10 @@
+target
+.git
+.env
+.env.*
+!.env.example
+!.env.macos.example
+artifacts
+docs
+
+.agent-handoff

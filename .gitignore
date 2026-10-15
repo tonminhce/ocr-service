@@ -1,0 +1,32 @@
+/target/
+.env
+.DS_Store
+/artifacts/
+__pycache__/
+*.pyc
+
+# Private conversation exports, uploaded documents and runtime/evaluation outputs.
+/.agent-handoff/
+.env.*
+!.env.example
+!.env.macos.example
+!.env.production.example
+*.pdf
+*.png
+*.jpg
+*.jpeg
+*.webp
+*.json
+# Versioned public contracts and explicitly synthetic regression fixtures only.
+!/schemas/*.schema.json
+!/crates/ocr-eval/fixtures/synthetic/manifest.json
+!/crates/ocr-eval/fixtures/synthetic/business.json
+!/crates/ocr-worker/tests/fixtures/two_pages.pdf
+# Local audit/render outputs and documents tied to the private development sample.
+/docs/*.html
+/docs/research/
+/docs/real-e2e-report.md
+/docs/layout-e2e-report.md
+/docs/production-pass-validation.md
+/docs/validation.md
+/docs/run-production-local.md

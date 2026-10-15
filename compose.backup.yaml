@@ -1,0 +1,41 @@
+# Add to compose.production.yaml only for explicit one-shot backup operations.
+# No service starts through this override unless named explicitly/profile ops.
+x-backup: &backup
+  image: ${BACKUP_IMAGE:-ocr-service:backup-a05}
+  build: {context: ., target: backup-ops}
+  profiles: [ops]
+  user: "10001:10001"
+  restart: "no"
+  read_only: true
+  security_opt: ["no-new-privileges:true"]
+  cap_drop: ["ALL"]
+  mem_limit: 2g
+  cpus: 1.0
+  pids_limit: 64
+  tmpfs:
+    - /scratch:size=${BACKUP_SCRATCH_SIZE:-512m},mode=0700,uid=10001,gid=10001
+
+services:
+  backup:
+    <<: *backup
+    command: [ocr-backup, --help]
+    environment:
+      DATABASE_URL_FILE: /run/secrets/backup_database_url
+    secrets: [backup_database_url, backup_recipient]
+    volumes: ["backup-data:/backups"]
+
+  backup-verify:
+    <<: *backup
+    command: [ocr-backup, --help]
+    network_mode: none
+    secrets: [backup_identity]
+    volumes: ["backup-data:/backups:ro"]
+
+secrets:
+  backup_database_url: {file: "${PROD_SECRETS_DIR:-./artifacts/production-secrets}/backup_database_url"}
+  backup_recipient: {file: "${BACKUP_KEY_DIR:?set BACKUP_KEY_DIR}/recipient.txt"}
+  backup_identity: {file: "${BACKUP_KEY_DIR:?set BACKUP_KEY_DIR}/identity.txt"}
+
+volumes:
+  backup-data:
+    name: ${BACKUP_VOLUME:?set a dedicated BACKUP_VOLUME}

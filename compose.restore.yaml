@@ -1,0 +1,74 @@
+# Standalone quarantine: fresh PostgreSQL only, no API/worker/Redis/model.
+# Bootstrap roles first. Never migrate before this full-schema restore.
+name: rust-ocr-restore-${OCR_RESTORE_PROJECT:?set a fresh isolated restore suffix}
+
+x-ops: &ops
+  image: ${BACKUP_IMAGE:-ocr-service:backup-a05}
+  build: {context: ., target: backup-ops}
+  user: "10001:10001"
+  restart: "no"
+  profiles: [ops]
+  read_only: true
+  security_opt: ["no-new-privileges:true"]
+  cap_drop: ["ALL"]
+  mem_limit: 2g
+  cpus: 1.0
+  pids_limit: 64
+  tmpfs:
+    - /scratch:size=${BACKUP_SCRATCH_SIZE:-512m},mode=0700,uid=10001,gid=10001
+
+services:
+  postgres:
+    image: postgres:18@sha256:74935e72241653ca55e0414067e6d8763aceb8a810eb51b452253ec3dcfc4336
+    environment:
+      POSTGRES_DB: ocr
+      POSTGRES_USER: ocr_admin
+      POSTGRES_PASSWORD_FILE: /run/secrets/postgres_admin_password
+    secrets: [postgres_admin_password]
+    volumes: ["restore-postgres:/var/lib/postgresql"]
+    networks: [quarantine]
+    healthcheck:
+      test: [CMD, pg_isready, -U, ocr_admin, -d, postgres]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  bootstrap:
+    <<: *ops
+    command: [ocr-admin, roles, bootstrap]
+    depends_on: {postgres: {condition: service_healthy}}
+    networks: [quarantine]
+    environment:
+      DATABASE_URL_FILE: /run/secrets/admin_database_url
+      OCR_MIGRATOR_PASSWORD_FILE: /run/secrets/migrator_password
+      OCR_API_PASSWORD_FILE: /run/secrets/api_password
+      OCR_WORKER_PASSWORD_FILE: /run/secrets/worker_password
+      OCR_MAINTENANCE_PASSWORD_FILE: /run/secrets/maintenance_password
+      OCR_BACKUP_PASSWORD_FILE: /run/secrets/backup_password
+    secrets: [admin_database_url, migrator_password, api_password, worker_password, maintenance_password, backup_password]
+
+  restore:
+    <<: *ops
+    command: [ocr-backup, --help]
+    depends_on: {postgres: {condition: service_healthy}}
+    networks: [quarantine]
+    environment:
+      DATABASE_URL_FILE: /run/secrets/migrator_database_url
+    secrets: [migrator_database_url, backup_identity]
+    volumes: ["backup-data:/backups:ro"]
+
+networks:
+  quarantine: {internal: true}
+volumes:
+  restore-postgres:
+  backup-data: {external: true, name: "${BACKUP_VOLUME:?set encrypted source BACKUP_VOLUME}"}
+secrets:
+  postgres_admin_password: {file: "${RESTORE_SECRETS_DIR:?set fresh RESTORE_SECRETS_DIR}/postgres_admin_password"}
+  admin_database_url: {file: "${RESTORE_SECRETS_DIR:?set fresh RESTORE_SECRETS_DIR}/admin_database_url"}
+  migrator_database_url: {file: "${RESTORE_SECRETS_DIR:?set fresh RESTORE_SECRETS_DIR}/migrator_database_url"}
+  migrator_password: {file: "${RESTORE_SECRETS_DIR:?set fresh RESTORE_SECRETS_DIR}/migrator_password"}
+  api_password: {file: "${RESTORE_SECRETS_DIR:?set fresh RESTORE_SECRETS_DIR}/api_password"}
+  worker_password: {file: "${RESTORE_SECRETS_DIR:?set fresh RESTORE_SECRETS_DIR}/worker_password"}
+  maintenance_password: {file: "${RESTORE_SECRETS_DIR:?set fresh RESTORE_SECRETS_DIR}/maintenance_password"}
+  backup_password: {file: "${RESTORE_SECRETS_DIR:?set fresh RESTORE_SECRETS_DIR}/backup_password"}
+  backup_identity: {file: "${BACKUP_KEY_DIR:?set BACKUP_KEY_DIR}/identity.txt"}

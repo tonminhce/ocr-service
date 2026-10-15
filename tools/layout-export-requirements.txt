@@ -1,0 +1,11 @@
+# Offline artifact build only. None of these run in the application container.
+torch==2.13.0
+torchvision==0.28.0
+transformers==5.17.0
+onnx==1.19.1
+onnxruntime==1.23.2
+opencv-python-headless==5.0.0.93
+numpy==2.3.5
+Pillow==12.3.0
+huggingface-hub==1.33.0
+safetensors==0.8.0

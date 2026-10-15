@@ -1,0 +1,178 @@
+name: rust-ocr
+
+x-rust-service: &rust-service
+  image: ocr-service:local
+  build: .
+  restart: unless-stopped
+  depends_on:
+    postgres:
+      condition: service_healthy
+  environment: &rust-environment
+    DATABASE_URL: postgres://ocr:ocr-local@postgres:5432/ocr
+    RUST_LOG: ${RUST_LOG:-info}
+  security_opt:
+    - no-new-privileges:true
+  cap_drop:
+    - ALL
+  read_only: true
+  tmpfs:
+    - /tmp:size=256m,mode=1777
+
+services:
+  redis:
+    image: redis:8.2-alpine@sha256:b51665e66f00759be7c3152ad5ac3c66fb2f619c13ef62dea7cc1f9914524635
+    restart: unless-stopped
+    command:
+      - sh
+      - -c
+      - 'exec redis-server --appendonly yes --appendfsync everysec --maxmemory 128mb --maxmemory-policy noeviction --requirepass "$$REDIS_PASSWORD"'
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD:-redis-local}
+    ports:
+      - "127.0.0.1:6379:6379"
+    volumes:
+      - redis-data:/data
+    mem_limit: 256m
+    healthcheck:
+      test: ["CMD-SHELL", 'REDISCLI_AUTH="$$REDIS_PASSWORD" redis-cli ping | grep -q PONG']
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  postgres:
+    image: postgres:18
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ocr
+      POSTGRES_USER: ocr
+      POSTGRES_PASSWORD: ocr-local
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ocr -d ocr"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  migrate:
+    <<: *rust-service
+    restart: "no"
+    # Local/demo identity only. Production uses a separate restricted migrator.
+    command: ["ocr-admin", "schema", "migrate-dev"]
+
+  api:
+    <<: *rust-service
+    command: ["ocr-api"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "service-client", "--healthcheck"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+    ports:
+      - "127.0.0.1:8080:8080"
+      - "127.0.0.1:9091:9091"
+    environment:
+      <<: *rust-environment
+      OCR_API_TOKEN: ${OCR_API_TOKEN:?Set OCR_API_TOKEN in .env}
+      OCR_REVIEW_TOKEN: ${OCR_REVIEW_TOKEN:-}
+      OCR_REVIEW_PRINCIPAL: ${OCR_REVIEW_PRINCIPAL:-}
+      API_METRICS_BIND_ADDR: ${API_METRICS_BIND_ADDR:-}
+      METRICS_BEARER_TOKEN: ${METRICS_BEARER_TOKEN:-}
+      MAX_UPLOAD_BYTES: ${MAX_UPLOAD_BYTES:-10485760}
+      UPLOAD_TIMEOUT_SECONDS: ${UPLOAD_TIMEOUT_SECONDS:-30}
+      UPLOAD_CONCURRENCY: ${UPLOAD_CONCURRENCY:-8}
+      MAX_PENDING_JOBS: ${MAX_PENDING_JOBS:-1000}
+      ENQUEUE_TIMEOUT_MS: ${ENQUEUE_TIMEOUT_MS:-10000}
+      ENQUEUE_LOCK_TIMEOUT_MS: ${ENQUEUE_LOCK_TIMEOUT_MS:-2000}
+      ENQUEUE_STATEMENT_TIMEOUT_MS: ${ENQUEUE_STATEMENT_TIMEOUT_MS:-5000}
+      RESPONSE_SMALL_CONCURRENCY: ${RESPONSE_SMALL_CONCURRENCY:-32}
+      RESPONSE_LARGE_CONCURRENCY: ${RESPONSE_LARGE_CONCURRENCY:-8}
+      RESPONSE_SERIALIZATION_CONCURRENCY: ${RESPONSE_SERIALIZATION_CONCURRENCY:-4}
+      RESPONSE_MAX_SMALL_BYTES: ${RESPONSE_MAX_SMALL_BYTES:-65536}
+      RESPONSE_MAX_JSON_BYTES: ${RESPONSE_MAX_JSON_BYTES:-16777216}
+      RESPONSE_MAX_SOURCE_BYTES: ${RESPONSE_MAX_SOURCE_BYTES:-52428800}
+      RESPONSE_LARGE_RESERVED_BYTES: ${RESPONSE_LARGE_RESERVED_BYTES:-134217728}
+      RESPONSE_READ_TIMEOUT_SECONDS: ${RESPONSE_READ_TIMEOUT_SECONDS:-10}
+      RESPONSE_BODY_TIMEOUT_SECONDS: ${RESPONSE_BODY_TIMEOUT_SECONDS:-30}
+      HTTP_MAX_CONNECTIONS: ${HTTP_MAX_CONNECTIONS:-128}
+      HTTP_WRITE_BUFFER_BYTES: ${HTTP_WRITE_BUFFER_BYTES:-65536}
+      HTTP_HEADER_TIMEOUT_SECONDS: ${HTTP_HEADER_TIMEOUT_SECONDS:-10}
+      HTTP_WRITE_STALL_TIMEOUT_SECONDS: ${HTTP_WRITE_STALL_TIMEOUT_SECONDS:-10}
+      HTTP_CONNECTION_LIFETIME_SECONDS: ${HTTP_CONNECTION_LIFETIME_SECONDS:-120}
+
+  worker:
+    <<: *rust-service
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    command: ["ocr-worker"]
+    ports:
+      - "127.0.0.1:9092:9092"
+    mem_limit: 2g
+    # Must cover JOB_TIMEOUT_SECONDS when allowing active jobs to finish.
+    stop_grace_period: ${WORKER_STOP_GRACE_PERIOD:-610s}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - type: bind
+        source: ${LAYOUT_MODEL_DIR:-./artifacts/models/pp-doclayout-v3}
+        target: /models/layout
+        read_only: true
+        bind:
+          create_host_path: false
+    environment:
+      <<: *rust-environment
+      REDIS_URL: ${COMPOSE_REDIS_URL:-redis://:redis-local@redis:6379/0}
+      REDIS_STREAM: ${REDIS_STREAM:-ocr:jobs}
+      REDIS_CONSUMER_GROUP: ${REDIS_CONSUMER_GROUP:-ocr-workers}
+      REDIS_TIMEOUT_MS: ${REDIS_TIMEOUT_MS:-2000}
+      REDIS_REDISPATCH_SECONDS: ${REDIS_REDISPATCH_SECONDS:-30}
+      VLLM_BASE_URL: ${COMPOSE_VLLM_BASE_URL:-http://host.docker.internal:8000/v1}
+      VLLM_MODEL: ${VLLM_MODEL:-Qwen/Qwen3.5-4B}
+      VLLM_API_KEY: ${VLLM_API_KEY:-}
+      INFERENCE_REVISION: ${INFERENCE_REVISION:-}
+      INFERENCE_DEPLOYMENT_JSON: ${INFERENCE_DEPLOYMENT_JSON:-}
+      REGION_CHECKPOINTS_ENABLED: ${REGION_CHECKPOINTS_ENABLED:-false}
+      REGION_RECOVERY_MAX_REGIONS: ${REGION_RECOVERY_MAX_REGIONS:-0}
+      REGION_RECOVERY_EXPANSION_PIXELS: ${REGION_RECOVERY_EXPANSION_PIXELS:-16}
+      WORKER_METRICS_BIND_ADDR: ${WORKER_METRICS_BIND_ADDR:-}
+      METRICS_BEARER_TOKEN: ${METRICS_BEARER_TOKEN:-}
+      WORKER_CONCURRENCY: ${WORKER_CONCURRENCY:-2}
+      LEASE_SECONDS: ${LEASE_SECONDS:-60}
+      MAX_ATTEMPTS: ${MAX_ATTEMPTS:-3}
+      POLL_INTERVAL_MS: ${POLL_INTERVAL_MS:-500}
+      REQUEST_TIMEOUT_SECONDS: ${REQUEST_TIMEOUT_SECONDS:-120}
+      JOB_TIMEOUT_SECONDS: ${JOB_TIMEOUT_SECONDS:-600}
+      MAX_PAGES: ${MAX_PAGES:-20}
+      MAX_IMAGE_PIXELS: ${MAX_IMAGE_PIXELS:-40000000}
+      MAX_IMAGE_EDGE: ${MAX_IMAGE_EDGE:-2000}
+      PDF_RENDER_DPI: ${PDF_RENDER_DPI:-200}
+      PAGE_MAX_EDGE: ${PAGE_MAX_EDGE:-3500}
+      OCR_STRATEGY: ${OCR_STRATEGY:-course_layout_vlm}
+      LAYOUT_MODEL_PATH: /models/layout/model.onnx
+      LAYOUT_MODEL_SHA256: ${LAYOUT_MODEL_SHA256:-}
+      LAYOUT_TIMEOUT_SECONDS: ${LAYOUT_TIMEOUT_SECONDS:-60}
+      LAYOUT_POOL_SIZE: ${LAYOUT_POOL_SIZE:-1}
+      MAX_REGIONS_PER_PAGE: ${MAX_REGIONS_PER_PAGE:-128}
+      MAX_REGIONS_PER_DOCUMENT: ${MAX_REGIONS_PER_DOCUMENT:-2048}
+      REGION_CONCURRENCY: ${REGION_CONCURRENCY:-4}
+      OCR_RECOGNIZE_IMAGES: ${OCR_RECOGNIZE_IMAGES:-false}
+      TABLE_CROP_PADDING_PIXELS: ${TABLE_CROP_PADDING_PIXELS:-0}
+      PDF_RENDER_TIMEOUT_SECONDS: ${PDF_RENDER_TIMEOUT_SECONDS:-30}
+      MAX_OUTPUT_TOKENS: ${MAX_OUTPUT_TOKENS:-8192}
+      RETENTION_DAYS: ${RETENTION_DAYS:-7}
+
+volumes:
+  postgres-data:
+  redis-data:

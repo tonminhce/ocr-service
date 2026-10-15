@@ -1,0 +1,34 @@
+# Disposable test infrastructure only; never shares application volumes/secrets.
+name: rust-ocr-verify
+services:
+  postgres:
+    image: postgres:18
+    environment:
+      POSTGRES_DB: ocr_test
+      POSTGRES_USER: ocr_test_admin
+      POSTGRES_PASSWORD: isolated-tests-only
+    ports: ["127.0.0.1:55434:5432"]
+    tmpfs: ["/var/lib/postgresql"]
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "ocr_test_admin", "-d", "ocr_test"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+  redis:
+    image: redis:8.2-alpine@sha256:b51665e66f00759be7c3152ad5ac3c66fb2f619c13ef62dea7cc1f9914524635
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    ports: ["127.0.0.1:56381:6379"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+  redis-oom:
+    image: redis:8.2-alpine@sha256:b51665e66f00759be7c3152ad5ac3c66fb2f619c13ef62dea7cc1f9914524635
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    ports: ["127.0.0.1:56382:6379"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 3s
+      retries: 30

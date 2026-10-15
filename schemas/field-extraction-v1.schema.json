@@ -1,0 +1,365 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:ocr-service:schema:field-extraction:1.0.0",
+  "title": "Proposed field extraction evidence envelope",
+  "description": "Design artifact for a future API; this is not an implemented API contract. Source pages are one-based, spans are end-exclusive UTF-8 byte offsets, and scores require external calibration records.",
+  "$comment": "Rust must additionally verify unique IDs, artifact/document/role/region references, page membership and distinguishable scopes for documents sharing a page, actual UTF-8 boundaries and start < end, exact source slice == quote, raw extracted value supported by evidence, authentic polygon/calibration records, typed normalization, candidate distinctions, derived input provenance, and the business policy for every accepted critical field. JSON Schema does not prove OCR accuracy or semantic correctness.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "source_artifacts", "logical_documents", "roles", "fields", "validation_issues", "review", "metadata"],
+  "properties": {
+    "schema_version": { "const": "1.0.0" },
+    "source_artifacts": {
+      "type": "array", "minItems": 1,
+      "items": { "$ref": "#/$defs/sourceArtifact" }
+    },
+    "logical_documents": {
+      "type": "array", "minItems": 1,
+      "items": { "$ref": "#/$defs/logicalDocument" }
+    },
+    "roles": { "type": "array", "items": { "$ref": "#/$defs/role" } },
+    "fields": {
+      "type": "object", "minProperties": 1,
+      "propertyNames": { "$ref": "#/$defs/semanticKey" },
+      "additionalProperties": { "$ref": "#/$defs/field" }
+    },
+    "validation_issues": {
+      "type": "array", "items": { "$ref": "#/$defs/validationIssue" }
+    },
+    "review": { "$ref": "#/$defs/review" },
+    "metadata": { "$ref": "#/$defs/metadata" }
+  },
+  "allOf": [
+    {
+      "if": {
+        "required": ["review"],
+        "properties": { "review": { "required": ["decision"], "properties": { "decision": { "const": "accepted" } } } }
+      },
+      "then": {
+        "properties": {
+          "validation_issues": { "items": { "properties": { "severity": { "const": "warning" } } } },
+          "fields": {
+            "additionalProperties": {
+              "properties": {
+                "value_status": { "not": { "enum": ["ambiguous", "conflict"] } },
+                "validation_issues": { "items": { "properties": { "severity": { "const": "warning" } } } }
+              }
+            }
+          }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "id": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[A-Za-z][A-Za-z0-9_.:-]*$" },
+    "semanticKey": {
+      "type": "string", "minLength": 1, "maxLength": 256,
+      "pattern": "^[a-z][a-z0-9_]*(\\.[a-z][a-z0-9_]*)*$",
+      "description": "Semantic field path, for example contract.rent.monthly. Include a stable role ID in paths for repeated people, for example contract.parties.landlord_1.name, and set matching role_id. Rust must reject duplicate JSON map keys instead of overwriting another party."
+    },
+    "nonEmptyText": { "type": "string", "minLength": 1 },
+    "nullableText": { "type": ["string", "null"], "minLength": 1 },
+    "sourceArtifact": {
+      "type": "object", "additionalProperties": false,
+      "required": ["artifact_id", "kind", "page_number", "sha256", "text"],
+      "properties": {
+        "artifact_id": { "$ref": "#/$defs/id" },
+        "kind": { "enum": ["ocr_text", "rendered_page"] },
+        "page_number": { "type": "integer", "minimum": 1 },
+        "sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+        "text": { "type": ["string", "null"] }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "kind": { "const": "rendered_page" } } },
+          "then": { "properties": { "text": { "type": "null" } } }
+        }
+      ],
+      "description": "Immutable artifact identity and digest. text may be null when fetched separately by artifact_id; its digest must match the referenced original bytes."
+    },
+    "logicalDocument": {
+      "type": "object", "additionalProperties": false,
+      "required": ["document_id", "kind", "pages"],
+      "properties": {
+        "document_id": { "$ref": "#/$defs/id" },
+        "kind": { "$ref": "#/$defs/nonEmptyText" },
+        "pages": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "type": "integer", "minimum": 1 } },
+        "regions": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/logicalRegion" } }
+      },
+      "description": "One logical document in a bundle. Multiple logical documents may share a physical page when distinguishable validated regions identify their scopes. Front/back regions of one ID remain in one logical document. If regions are absent, pages denote whole-page scope. Rust validates classifier policy, page/region membership, and field scope; kind alone does not establish party roles."
+    },
+    "logicalRegion": {
+      "type": "object", "additionalProperties": false,
+      "required": ["region_id", "page_number", "side", "scope"],
+      "properties": {
+        "region_id": { "$ref": "#/$defs/id" },
+        "page_number": { "type": "integer", "minimum": 1 },
+        "side": { "enum": ["front", "back", "unspecified"] },
+        "scope": { "$ref": "#/$defs/evidence" }
+      },
+      "allOf": [
+        {
+          "properties": {
+            "scope": {
+              "anyOf": [
+                { "properties": { "span": { "$ref": "#/$defs/textSpan" } } },
+                { "properties": { "polygon": { "$ref": "#/$defs/verifiedPolygon" } } }
+              ]
+            }
+          }
+        }
+      ],
+      "description": "Evidence-backed logical region. At least a located OCR quote or genuine verified polygon is needed. Region page must match scope page and belong to the logical document. Text-only scope routes OCR text but does not claim image coordinates; Rust verifies distinguishability when documents share a page."
+    },
+    "role": {
+      "type": "object", "additionalProperties": false,
+      "required": ["role_id", "logical_document_id", "role_type"],
+      "properties": {
+        "role_id": { "$ref": "#/$defs/id" },
+        "logical_document_id": { "$ref": "#/$defs/id" },
+        "role_type": { "enum": ["landlord", "tenant", "representative", "identity_holder", "other", "unknown"] }
+      }
+    },
+    "textSpan": {
+      "type": "object", "additionalProperties": false,
+      "required": ["start", "end", "unit"],
+      "properties": {
+        "start": { "type": "integer", "minimum": 0 },
+        "end": { "type": "integer", "minimum": 1 },
+        "unit": { "const": "utf8_bytes" }
+      },
+      "description": "End-exclusive offsets in the exact referenced page OCR artifact, never in normalized text. Rust must check start < end, UTF-8 boundaries, length, and exact quote equality."
+    },
+    "point": {
+      "type": "array", "minItems": 2, "maxItems": 2,
+      "prefixItems": [
+        { "type": "number", "minimum": 0, "maximum": 1 },
+        { "type": "number", "minimum": 0, "maximum": 1 }
+      ],
+      "items": false
+    },
+    "verifiedPolygon": {
+      "type": "object", "additionalProperties": false,
+      "required": ["coordinate_system", "points", "verified", "verification_record_id"],
+      "properties": {
+        "coordinate_system": { "const": "normalized_page_top_left" },
+        "points": { "type": "array", "minItems": 3, "maxItems": 32, "items": { "$ref": "#/$defs/point" } },
+        "verified": { "const": true },
+        "verification_record_id": { "$ref": "#/$defs/id" }
+      },
+      "description": "[x,y] normalized to the original page, origin top-left. Only a coordinate-producing stage or recorded human verification may supply this. Rust verifies the record, coordinate transform, and nondegenerate geometry; a model saying verified=true is insufficient."
+    },
+    "evidence": {
+      "type": "object", "additionalProperties": false,
+      "required": ["artifact_id", "page_number", "quote", "span", "polygon"],
+      "properties": {
+        "artifact_id": { "$ref": "#/$defs/id" },
+        "page_number": { "type": "integer", "minimum": 1 },
+        "region_id": { "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/id" }] },
+        "quote": { "$ref": "#/$defs/nullableText" },
+        "span": { "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/textSpan" }] },
+        "polygon": { "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/verifiedPolygon" }] }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "span": { "type": "object" } } },
+          "then": { "properties": { "quote": { "$ref": "#/$defs/nonEmptyText" } } }
+        },
+        {
+          "if": { "properties": { "quote": { "type": "null" } } },
+          "then": { "properties": { "span": { "type": "null" } } }
+        }
+      ]
+    },
+    "quotedEvidence": {
+      "type": "array", "minItems": 1,
+      "contains": {
+        "type": "object", "required": ["quote", "span"],
+        "properties": {
+          "quote": { "$ref": "#/$defs/nonEmptyText" },
+          "span": { "$ref": "#/$defs/textSpan" }
+        }
+      },
+      "description": "At least one exact, located OCR quote must support an extracted value. Geometry-only evidence does not meet this text-extraction contract."
+    },
+    "confidence": {
+      "oneOf": [
+        { "type": "null" },
+        {
+          "type": "object", "additionalProperties": false,
+          "required": ["score", "calibration_record_id"],
+          "properties": {
+            "score": { "type": "number", "minimum": 0, "maximum": 1 },
+            "calibration_record_id": { "$ref": "#/$defs/id" }
+          }
+        }
+      ],
+      "description": "Null when no validated score exists. A supplied score is unusable until Rust verifies its calibration record against model revision, field/task, dataset, and score method. LLM self-ratings are not calibrated confidence."
+    },
+    "normalizedValue": {
+      "oneOf": [
+        {
+          "type": "object", "additionalProperties": false,
+          "required": ["type", "value", "scheme"],
+          "properties": {
+            "type": { "const": "identifier" },
+            "value": { "$ref": "#/$defs/nonEmptyText" },
+            "scheme": { "$ref": "#/$defs/nullableText" }
+          },
+          "description": "Identifiers remain strings; never remove leading zeros or infer missing digits. Domain format checks belong to the versioned policy."
+        },
+        {
+          "type": "object", "additionalProperties": false,
+          "required": ["type", "value"],
+          "properties": {
+            "type": { "const": "date" },
+            "value": { "type": "string", "format": "date", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$" }
+          },
+          "description": "Unambiguous complete calendar date only. Rust must reject invalid dates even when the JSON Schema validator treats format as annotation."
+        },
+        {
+          "type": "object", "additionalProperties": false,
+          "required": ["type", "amount", "currency", "billing_period"],
+          "properties": {
+            "type": { "const": "money" },
+            "amount": { "type": "string", "pattern": "^-?(0|[1-9][0-9]*)(\\.[0-9]+)?$" },
+            "currency": { "type": ["string", "null"], "pattern": "^[A-Z]{3}$" },
+            "billing_period": { "enum": ["day", "week", "month", "year", "one_time", "unspecified"] }
+          },
+          "description": "Decimal amount string, never binary float. Currency can remain null when not grounded. Rust validates currency, scale, sign, period, and rent/deposit semantics."
+        },
+        {
+          "type": "object", "additionalProperties": false,
+          "required": ["type", "value"],
+          "properties": {
+            "type": { "const": "text" },
+            "value": { "$ref": "#/$defs/nonEmptyText" }
+          }
+        }
+      ]
+    },
+    "derivation": {
+      "type": "object", "additionalProperties": false,
+      "required": ["rule_id", "input_field_keys", "rationale"],
+      "properties": {
+        "rule_id": { "$ref": "#/$defs/id" },
+        "input_field_keys": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "$ref": "#/$defs/semanticKey" } },
+        "rationale": { "$ref": "#/$defs/nonEmptyText" }
+      },
+      "description": "Record of an allowed versioned inference/normalization rule. Rust validates the input field references, rule outputs, and absence of cycles."
+    },
+    "candidate": {
+      "type": "object", "additionalProperties": false,
+      "required": ["candidate_id", "raw_value", "normalized_value", "method", "evidence", "confidence", "derivation"],
+      "properties": {
+        "candidate_id": { "$ref": "#/$defs/id" },
+        "raw_value": { "$ref": "#/$defs/nullableText" },
+        "normalized_value": { "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/normalizedValue" }] },
+        "method": { "enum": ["extracted", "derived"] },
+        "evidence": { "type": "array", "items": { "$ref": "#/$defs/evidence" } },
+        "confidence": { "$ref": "#/$defs/confidence" },
+        "derivation": { "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/derivation" }] }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "method": { "const": "extracted" } } },
+          "then": { "properties": { "raw_value": { "$ref": "#/$defs/nonEmptyText" }, "evidence": { "$ref": "#/$defs/quotedEvidence" }, "derivation": { "type": "null" } } }
+        },
+        {
+          "if": { "properties": { "method": { "const": "derived" } } },
+          "then": { "properties": { "raw_value": { "type": "null" }, "normalized_value": { "$ref": "#/$defs/normalizedValue" }, "derivation": { "$ref": "#/$defs/derivation" } } }
+        }
+      ]
+    },
+    "validationIssue": {
+      "type": "object", "additionalProperties": false,
+      "required": ["code", "severity", "message", "field_keys"],
+      "properties": {
+        "code": { "type": "string", "pattern": "^[A-Z][A-Z0-9_]*$" },
+        "severity": { "enum": ["warning", "error"] },
+        "message": { "$ref": "#/$defs/nonEmptyText" },
+        "field_keys": { "type": "array", "uniqueItems": true, "items": { "$ref": "#/$defs/semanticKey" } }
+      }
+    },
+    "field": {
+      "type": "object", "additionalProperties": false,
+      "required": ["logical_document_id", "role_id", "value_status", "raw_value", "normalized_value", "method", "evidence", "confidence", "candidates", "validation_issues", "derivation"],
+      "properties": {
+        "logical_document_id": { "$ref": "#/$defs/id" },
+        "role_id": { "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/id" }] },
+        "value_status": { "enum": ["found", "missing", "unreadable", "ambiguous", "conflict"] },
+        "raw_value": { "$ref": "#/$defs/nullableText" },
+        "normalized_value": { "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/normalizedValue" }] },
+        "method": { "enum": ["extracted", "derived"] },
+        "evidence": { "type": "array", "items": { "$ref": "#/$defs/evidence" } },
+        "confidence": { "$ref": "#/$defs/confidence" },
+        "candidates": { "type": "array", "items": { "$ref": "#/$defs/candidate" } },
+        "validation_issues": { "type": "array", "items": { "$ref": "#/$defs/validationIssue" } },
+        "derivation": { "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/derivation" }] }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "value_status": { "const": "found" } } },
+          "then": { "properties": { "normalized_value": { "$ref": "#/$defs/normalizedValue" }, "candidates": { "maxItems": 0 } } }
+        },
+        {
+          "if": { "properties": { "value_status": { "enum": ["missing", "unreadable"] } } },
+          "then": { "properties": { "raw_value": { "type": "null" }, "normalized_value": { "type": "null" }, "confidence": { "type": "null" }, "candidates": { "maxItems": 0 }, "derivation": { "type": "null" } } }
+        },
+        {
+          "if": { "properties": { "value_status": { "enum": ["ambiguous", "conflict"] } } },
+          "then": { "properties": { "raw_value": { "type": "null" }, "normalized_value": { "type": "null" }, "confidence": { "type": "null" }, "candidates": { "minItems": 2 }, "derivation": { "type": "null" }, "validation_issues": { "minItems": 1 } } }
+        },
+        {
+          "if": { "properties": { "value_status": { "const": "found" }, "method": { "const": "extracted" } } },
+          "then": { "properties": { "raw_value": { "$ref": "#/$defs/nonEmptyText" }, "evidence": { "$ref": "#/$defs/quotedEvidence" }, "derivation": { "type": "null" } } }
+        },
+        {
+          "if": { "properties": { "value_status": { "const": "found" }, "method": { "const": "derived" } } },
+          "then": { "properties": { "raw_value": { "type": "null" }, "derivation": { "$ref": "#/$defs/derivation" } } }
+        }
+      ]
+    },
+    "review": {
+      "type": "object", "additionalProperties": false,
+      "required": ["decision", "reason_codes", "review_record_id"],
+      "properties": {
+        "decision": { "enum": ["needs_review", "accepted", "rejected"] },
+        "reason_codes": { "type": "array", "uniqueItems": true, "items": { "type": "string", "pattern": "^[A-Z][A-Z0-9_]*$" } },
+        "review_record_id": { "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/id" }] }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "decision": { "enum": ["needs_review", "rejected"] } } },
+          "then": { "properties": { "reason_codes": { "minItems": 1 } } }
+        }
+      ],
+      "description": "Decision produced by validated policy or a recorded reviewer, not trusted directly from model output. Accepted results cannot contain ambiguous/conflicting fields or error issues; Rust additionally checks the profile's critical fields."
+    },
+    "model": {
+      "type": "object", "additionalProperties": false,
+      "required": ["id", "revision", "quantization"],
+      "properties": {
+        "id": { "$ref": "#/$defs/nonEmptyText" },
+        "revision": { "$ref": "#/$defs/nonEmptyText" },
+        "quantization": { "$ref": "#/$defs/nonEmptyText" }
+      }
+    },
+    "metadata": {
+      "type": "object", "additionalProperties": false,
+      "required": ["model", "prompt_versions", "schema_version", "business_schema_id", "normalizer_version", "policy_version"],
+      "properties": {
+        "model": { "$ref": "#/$defs/model" },
+        "ocr_model": { "$ref": "#/$defs/model" },
+        "prompt_versions": {
+          "type": "object", "additionalProperties": false, "required": ["ocr", "extraction"],
+          "properties": { "ocr": { "$ref": "#/$defs/nonEmptyText" }, "extraction": { "$ref": "#/$defs/nonEmptyText" } }
+        },
+        "schema_version": { "const": "1.0.0" },
+        "business_schema_id": { "$ref": "#/$defs/nonEmptyText" },
+        "normalizer_version": { "$ref": "#/$defs/nonEmptyText" },
+        "policy_version": { "$ref": "#/$defs/nonEmptyText" }
+      }
+    }
+  }
+}

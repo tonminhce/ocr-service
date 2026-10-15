@@ -1,0 +1,170 @@
+# Standalone deployment, not an override of compose.yaml. See docs/a03-operations.md.
+name: rust-ocr-production
+
+x-runtime: &runtime
+  image: ${PROD_IMAGE:-ocr-service:a05}
+  build: .
+  user: "10001:10001"
+  security_opt: ["no-new-privileges:true"]
+  cap_drop: ["ALL"]
+  read_only: true
+  tmpfs: ["/tmp:size=256m,mode=1777"]
+
+services:
+  postgres:
+    image: postgres:18
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ocr
+      POSTGRES_USER: ocr_admin
+      POSTGRES_PASSWORD_FILE: /run/secrets/postgres_admin_password
+    secrets: [postgres_admin_password]
+    volumes: ["postgres-data:/var/lib/postgresql"]
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "ocr_admin", "-d", "ocr"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  redis:
+    image: redis:8.2-alpine@sha256:b51665e66f00759be7c3152ad5ac3c66fb2f619c13ef62dea7cc1f9914524635
+    restart: unless-stopped
+    entrypoint: ["/bin/sh", "/opt/ocr/redis-start.sh"]
+    secrets: [redis_password]
+    volumes:
+      - redis-data:/data
+      - ./ops/redis-start.sh:/opt/ocr/redis-start.sh:ro
+    tmpfs: ["/run/redis-config:size=1m,mode=0755"]
+    mem_limit: 256m
+    healthcheck:
+      # Readiness confirms the authentication gate; worker tests authenticated IO.
+      test: ["CMD-SHELL", "redis-cli ping 2>/dev/null | grep -q NOAUTH"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  admin:
+    <<: *runtime
+    profiles: [ops]
+    restart: "no"
+    command: ["ocr-admin", "roles", "bootstrap"]
+    depends_on:
+      postgres: {condition: service_healthy}
+    environment:
+      DATABASE_URL_FILE: /run/secrets/admin_database_url
+      OCR_MIGRATOR_PASSWORD_FILE: /run/secrets/migrator_password
+      OCR_API_PASSWORD_FILE: /run/secrets/api_password
+      OCR_WORKER_PASSWORD_FILE: /run/secrets/worker_password
+      OCR_MAINTENANCE_PASSWORD_FILE: /run/secrets/maintenance_password
+      OCR_BACKUP_PASSWORD_FILE: /run/secrets/backup_password
+    secrets: [admin_database_url, migrator_password, api_password, worker_password, maintenance_password, backup_password]
+
+  migrate:
+    <<: *runtime
+    restart: "no"
+    command: ["ocr-admin", "schema", "migrate"]
+    depends_on:
+      postgres: {condition: service_healthy}
+    environment:
+      DATABASE_URL_FILE: /run/secrets/migrator_database_url
+    secrets: [migrator_database_url]
+
+  maintenance:
+    <<: *runtime
+    profiles: [ops]
+    restart: "no"
+    command: ["ocr-admin", "retention", "plan"]
+    depends_on:
+      postgres: {condition: service_healthy}
+    environment:
+      DATABASE_URL_FILE: /run/secrets/maintenance_database_url
+    secrets: [maintenance_database_url]
+
+  api:
+    <<: *runtime
+    restart: unless-stopped
+    command: ["ocr-api"]
+    depends_on:
+      postgres: {condition: service_healthy}
+      migrate: {condition: service_completed_successfully}
+    ports:
+      - "127.0.0.1:${PROD_API_PORT:-8180}:8080"
+      - "127.0.0.1:${PROD_API_METRICS_PORT:-9191}:9091"
+    environment:
+      DATABASE_URL_FILE: /run/secrets/api_database_url
+      OCR_API_TOKEN_FILE: /run/secrets/api_token
+      OCR_REVIEW_TOKEN_FILE: /run/secrets/review_token
+      OCR_REVIEW_PRINCIPAL: ${PROD_REVIEW_PRINCIPAL:-production-review-service}
+      API_METRICS_BIND_ADDR: 0.0.0.0:9091
+      METRICS_BEARER_TOKEN_FILE: /run/secrets/metrics_token
+      RUST_LOG: ${PROD_RUST_LOG:-info}
+    secrets: [api_database_url, api_token, review_token, metrics_token]
+    healthcheck:
+      test: ["CMD", "service-client", "--healthcheck"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  worker:
+    <<: *runtime
+    restart: unless-stopped
+    command: ["ocr-worker"]
+    depends_on:
+      postgres: {condition: service_healthy}
+      redis: {condition: service_healthy}
+      migrate: {condition: service_completed_successfully}
+    mem_limit: 2g
+    stop_grace_period: 610s
+    ports: ["127.0.0.1:${PROD_WORKER_METRICS_PORT:-9192}:9092"]
+    extra_hosts: ["host.docker.internal:host-gateway"]
+    volumes:
+      - type: bind
+        source: ${PROD_LAYOUT_MODEL_DIR:-./artifacts/models/pp-doclayout-v3}
+        target: /models/layout
+        read_only: true
+        bind: {create_host_path: false}
+    environment:
+      DATABASE_URL_FILE: /run/secrets/worker_database_url
+      REDIS_URL_FILE: /run/secrets/redis_url
+      VLLM_API_KEY_FILE: /run/secrets/vllm_api_key
+      VLLM_BASE_URL: ${PROD_VLLM_BASE_URL:-http://host.docker.internal:8000/v1}
+      VLLM_MODEL: ${PROD_VLLM_MODEL:-Qwen/Qwen3.5-4B}
+      INFERENCE_REVISION: ${PROD_INFERENCE_REVISION:-}
+      INFERENCE_DEPLOYMENT_JSON: ${PROD_INFERENCE_DEPLOYMENT_JSON:-}
+      WORKER_CONCURRENCY: 1
+      REGION_CONCURRENCY: 1
+      LAYOUT_POOL_SIZE: 1
+      LAYOUT_MODEL_PATH: /models/layout/model.onnx
+      LAYOUT_MODEL_SHA256: ${PROD_LAYOUT_MODEL_SHA256:-}
+      OCR_STRATEGY: ${PROD_OCR_STRATEGY:-course_layout_vlm}
+      REGION_CHECKPOINTS_ENABLED: ${PROD_REGION_CHECKPOINTS_ENABLED:-false}
+      REGION_RECOVERY_MAX_REGIONS: ${PROD_REGION_RECOVERY_MAX_REGIONS:-0}
+      REGION_RECOVERY_EXPANSION_PIXELS: ${PROD_REGION_RECOVERY_EXPANSION_PIXELS:-16}
+      MAX_OUTPUT_TOKENS: ${PROD_MAX_OUTPUT_TOKENS:-2048}
+      WORKER_METRICS_BIND_ADDR: 0.0.0.0:9092
+      METRICS_BEARER_TOKEN_FILE: /run/secrets/metrics_token
+      RUST_LOG: ${PROD_RUST_LOG:-info}
+    secrets: [worker_database_url, redis_url, vllm_api_key, metrics_token]
+
+secrets:
+  postgres_admin_password: {file: "${PROD_SECRETS_DIR:-./artifacts/production-secrets}/postgres_admin_password"}
+  admin_database_url: {file: "${PROD_SECRETS_DIR:-./artifacts/production-secrets}/admin_database_url"}
+  migrator_password: {file: "${PROD_SECRETS_DIR:-./artifacts/production-secrets}/migrator_password"}
+  api_password: {file: "${PROD_SECRETS_DIR:-./artifacts/production-secrets}/api_password"}
+  worker_password: {file: "${PROD_SECRETS_DIR:-./artifacts/production-secrets}/worker_password"}
+  maintenance_password: {file: "${PROD_SECRETS_DIR:-./artifacts/production-secrets}/maintenance_password"}
+  backup_password: {file: "${PROD_SECRETS_DIR:-./artifacts/production-secrets}/backup_password"}
+  migrator_database_url: {file: "${PROD_SECRETS_DIR:-./artifacts/production-secrets}/migrator_database_url"}
+  maintenance_database_url: {file: "${PROD_SECRETS_DIR:-./artifacts/production-secrets}/maintenance_database_url"}
+  api_database_url: {file: "${PROD_SECRETS_DIR:-./artifacts/production-secrets}/api_database_url"}
+  worker_database_url: {file: "${PROD_SECRETS_DIR:-./artifacts/production-secrets}/worker_database_url"}
+  redis_password: {file: "${PROD_SECRETS_DIR:-./artifacts/production-secrets}/redis_password"}
+  redis_url: {file: "${PROD_SECRETS_DIR:-./artifacts/production-secrets}/redis_url"}
+  api_token: {file: "${PROD_SECRETS_DIR:-./artifacts/production-secrets}/api_token"}
+  review_token: {file: "${PROD_SECRETS_DIR:-./artifacts/production-secrets}/review_token"}
+  metrics_token: {file: "${PROD_SECRETS_DIR:-./artifacts/production-secrets}/metrics_token"}
+  vllm_api_key: {file: "${PROD_SECRETS_DIR:-./artifacts/production-secrets}/vllm_api_key"}
+
+volumes:
+  postgres-data:
+  redis-data:

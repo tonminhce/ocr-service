@@ -1,0 +1,741 @@
+openapi: 3.1.0
+info:
+  title: Internal OCR service
+  version: 0.1.0
+  license: {name: MIT, identifier: MIT}
+  description: >-
+    Rust API, consumer, and PP-DocLayoutV3 ONNX layout detector, with Redis Streams
+    delivery, durable PostgreSQL jobs/outbox/results, and external Qwen3.5-4B
+    vision inference. The default course_layout_vlm result contains ordered
+    spatial regions and Markdown. Shared service token scope; no tenant
+    isolation. An optional vi_rental_contract_v1 profile adds evidence-linked
+    fields and cross-source conflicts; every extraction requires human review.
+    The bounded transport accepts HTTP/1.1; it does not advertise HTTP/2 or h2c.
+    Every response includes Cache-Control private, no-store and nosniff.
+    Response bodies, serialization, connections and slow readers have independent
+    limits. Small status polling has a separate response budget. At connection
+    capacity a new TCP socket closes before HTTP parsing; retry with backoff.
+servers:
+  - url: /
+    description: Deployment-relative API root
+security:
+  - serviceToken: []
+paths:
+  /v1/ocr/jobs:
+    post:
+      operationId: submitOcrJob
+      summary: Submit one PDF, PNG, JPEG, or WebP document
+      description: >-
+        Exactly one file and an optional extraction_profile field. Default file limit 10 MiB. A 202 response means
+        the PostgreSQL job/input/outbox transaction committed, not completed OCR.
+        Redis carries job IDs only; delivery can wait for Redis recovery after
+        durable acceptance. Strategy and recognition options are worker settings.
+        Upload and enqueue use separate deadlines. The default enqueue total is
+        10 seconds including pool acquire, with local lock/statement limits of
+        2/5 seconds. A 503 enqueue_timeout may have an unknown commit outcome;
+        retry with the same Idempotency-Key. A matching replay may contain the
+        full completed result and uses the same 16 MiB JSON wire limit as GET.
+      parameters:
+        - in: header
+          name: Idempotency-Key
+          description: Stable caller retry key. Matching bytes, media type and extraction profile replay the original job; a different fingerprint returns 409. Valid until the terminal job is pruned.
+          schema: {type: string, minLength: 1, maxLength: 128, pattern: '^[!-~]+$'}
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [file]
+              properties:
+                file: {type: string, format: binary}
+                extraction_profile:
+                  type: string
+                  enum: [none, vi_rental_contract_v1]
+                  default: none
+                  description: Persisted per job; the rental profile adds deterministic scoped extraction after OCR
+      responses:
+        '202':
+          description: Job durably accepted or matching replay returned
+          headers:
+            Location: {schema: {type: string}, description: Relative status endpoint}
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Job'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '408': {$ref: '#/components/responses/UploadTimeout'}
+        '409': {$ref: '#/components/responses/IdempotencyConflict'}
+        '413': {$ref: '#/components/responses/TooLarge'}
+        '415': {$ref: '#/components/responses/UnsupportedMediaType'}
+        '429': {$ref: '#/components/responses/AtCapacity'}
+        '500': {$ref: '#/components/responses/ResponseLimitExceeded'}
+        '503': {$ref: '#/components/responses/StorageUnavailable'}
+  /v1/ocr/jobs/{id}:
+    get:
+      operationId: getOcrJob
+      summary: Poll status and retrieve a completed result
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: {type: string, format: uuid}
+      responses:
+        '200':
+          description: Current job status, result, and most recent error
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Job'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '429': {$ref: '#/components/responses/AtCapacity'}
+        '500': {$ref: '#/components/responses/ResponseLimitExceeded'}
+        '503': {$ref: '#/components/responses/StorageUnavailable'}
+  /v1/ocr/jobs/{id}/status:
+    get:
+      operationId: getOcrJobCompactStatus
+      summary: Poll compact job and review metadata without loading result JSON
+      parameters:
+        - {$ref: '#/components/parameters/JobId'}
+      responses:
+        '200':
+          description: Compact metadata only; private no-store
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/CompactJobStatus'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '404': {description: Job missing or pruned}
+        '429': {$ref: '#/components/responses/AtCapacity'}
+        '500': {$ref: '#/components/responses/ResponseLimitExceeded'}
+        '503': {$ref: '#/components/responses/StorageUnavailable'}
+  /v1/ocr/jobs/{id}/business:
+    get:
+      operationId: getOcrJobBusinessResult
+      summary: Retrieve aggregate business fields and deduplicated evidence references
+      description: Original machine states/candidates remain visible; found never means approved. Human corrections and decisions are separate from raw OCR. Shared service trust domain, no tenant isolation.
+      parameters:
+        - {$ref: '#/components/parameters/JobId'}
+      responses:
+        '200':
+          description: Compact structured extraction with current review snapshot; private no-store
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/BusinessResult'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '404': {description: Job or successful structured result unavailable or pruned}
+        '429': {$ref: '#/components/responses/AtCapacity'}
+        '500': {$ref: '#/components/responses/ResponseLimitExceeded'}
+        '503': {$ref: '#/components/responses/StorageUnavailable'}
+  /v1/ocr/jobs/{id}/artifacts/{kind}:
+    get:
+      operationId: getOcrJobArtifact
+      summary: Download an authenticated immutable OCR artifact
+      description: Source limited to 50 MiB; other artifacts 16 MiB. Fixed safe attachment filenames, private no-store and nosniff headers. Original source exists only while retained. No filesystem path parameters.
+      parameters:
+        - {$ref: '#/components/parameters/JobId'}
+        - in: path
+          name: kind
+          required: true
+          schema: {type: string, enum: [source, markdown, layout, evidence, diagnostics, result]}
+      responses:
+        '200':
+          description: Requested artifact attachment
+          headers:
+            Cache-Control: {schema: {type: string, const: 'private, no-store'}}
+            X-Content-Type-Options: {schema: {type: string, const: nosniff}}
+            Content-Disposition: {schema: {type: string}, description: attachment with fixed safe filename}
+          content:
+            application/json: {schema: {}}
+            text/markdown: {schema: {type: string}}
+            application/pdf: {schema: {type: string, format: binary}}
+            image/png: {schema: {type: string, format: binary}}
+            image/jpeg: {schema: {type: string, format: binary}}
+            image/webp: {schema: {type: string, format: binary}}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '404': {description: Job or requested artifact unavailable or pruned}
+        '429': {$ref: '#/components/responses/AtCapacity'}
+        '500': {$ref: '#/components/responses/ResponseLimitExceeded'}
+        '503': {$ref: '#/components/responses/StorageUnavailable'}
+  /v1/ocr/jobs/{id}/review:
+    get:
+      operationId: getOcrJobReviewHistory
+      security: [{reviewToken: []}]
+      summary: Read latest human review snapshot and a bounded audit page
+      description: Disabled unless review credential and principal configured. Authenticates configured review service principal, not an individual human. Up to 100 events; use next_after_revision while has_more.
+      parameters:
+        - {$ref: '#/components/parameters/JobId'}
+        - in: query
+          name: after_revision
+          schema: {type: integer, minimum: 0, default: 0}
+      responses:
+        '200':
+          description: Latest snapshot and events after the cursor
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [snapshot, events, next_after_revision, has_more]
+                properties:
+                  snapshot: {$ref: '#/components/schemas/ReviewSnapshot'}
+                  events: {type: array, maxItems: 100, items: {$ref: '#/components/schemas/ReviewEvent'}}
+                  next_after_revision: {type: integer, minimum: 0}
+                  has_more: {type: boolean}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '404': {description: Review disabled or job missing/pruned}
+        '422': {description: Invalid revision cursor}
+        '429': {description: Review capacity busy}
+        '500': {$ref: '#/components/responses/ResponseLimitExceeded'}
+        '503': {$ref: '#/components/responses/StorageUnavailable'}
+    post:
+      operationId: appendOcrJobReview
+      security: [{reviewToken: []}]
+      summary: Append an evidence-linked correction or explicit human decision
+      description: Immutable raw OCR. Revision CAS and canonical UUID request replay, four admitted operations per API process. Explicit approval requires supported template, two unique roles, resolution of all aggregate conflicts/ambiguities, and evidence-linked name/ID/birth date/issue date/residence for both parties plus rent/property address. Correcting/reopening revokes approval. No automatic acceptance or asserted request actor.
+      parameters:
+        - {$ref: '#/components/parameters/JobId'}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/ReviewRequest'}
+      responses:
+        '200':
+          description: Committed snapshot or original matching request replay snapshot
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ReviewSnapshot'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '404': {description: Review disabled or successful structured extraction missing/unavailable/pruned}
+        '409': {description: Stale revision or request ID fingerprint/principal conflict}
+        '413': {description: JSON body exceeds 64 KiB}
+        '422': {description: Invalid correction, evidence, approval prerequisites or bounds}
+        '429': {description: Review capacity busy}
+        '500': {$ref: '#/components/responses/ResponseLimitExceeded'}
+        '503': {$ref: '#/components/responses/StorageUnavailable'}
+  /health/live:
+    get:
+      operationId: live
+      security: []
+      summary: API process liveness
+      responses:
+        '200': {description: API process running}
+  /health/ready:
+    get:
+      operationId: ready
+      security: []
+      summary: PostgreSQL connectivity; does not check Redis delivery, worker, or model progress
+      responses:
+        '200': {description: Database reachable}
+        '500': {$ref: '#/components/responses/ResponseLimitExceeded'}
+        '503': {$ref: '#/components/responses/StorageUnavailable'}
+components:
+  securitySchemes:
+    serviceToken: {type: http, scheme: bearer}
+    reviewToken: {type: http, scheme: bearer, description: Distinct privileged configured review service credential; does not establish a human identity}
+  parameters:
+    JobId:
+      in: path
+      name: id
+      required: true
+      schema: {type: string, format: uuid}
+  schemas:
+    CompactJobStatus:
+      type: object
+      additionalProperties: false
+      required: [id, status, attempts, extraction_profile, created_at, updated_at, error, result_available, review_revision, review_status]
+      properties:
+        id: {type: string, format: uuid}
+        status: {type: string, enum: [queued, processing, succeeded, failed]}
+        attempts: {type: integer, minimum: 0}
+        extraction_profile: {type: string}
+        created_at: {type: string, format: date-time}
+        updated_at: {type: string, format: date-time}
+        error: {type: [string, 'null']}
+        result_available: {type: boolean}
+        review_revision: {type: integer, minimum: 0}
+        review_status: {type: string, enum: [needs_review, approved, rejected]}
+    BusinessResult:
+      type: object
+      required: [schema_version, job_id, source_sha256, extraction_profile, supported_template, machine_decision, review, parties, fields, evidence, issue_codes]
+      properties:
+        schema_version: {type: string, const: ocr-business/1.0.0}
+        job_id: {type: string, format: uuid}
+        source_sha256: {type: [string, 'null'], description: Immutable uploaded-byte digest when loaded from store; null for extraction-only replay}
+        extraction_profile: {type: string}
+        supported_template: {type: boolean}
+        machine_decision: {type: string, const: needs_review}
+        review: {$ref: '#/components/schemas/ReviewSnapshot'}
+        parties:
+          type: array
+          items:
+            type: object
+            required: [id, role, field_prefix, role_evidence_refs]
+            properties:
+              id: {type: string}
+              role: {type: string, enum: [landlord, tenant, unknown]}
+              field_prefix: {type: string}
+              role_evidence_refs: {type: array, uniqueItems: true, items: {type: string}}
+        fields: {type: object, additionalProperties: {$ref: '#/components/schemas/BusinessField'}}
+        evidence: {type: object, description: Deduplicated original evidence keyed by ev_SHA256; spans and geometry retain original source scope, additionalProperties: {type: object}}
+        issue_codes: {type: array, uniqueItems: true, items: {type: string}}
+    BusinessField:
+      type: object
+      required: [state, value, confidence, confidence_kind, reason_codes, candidates, evidence_refs, approval, correction]
+      properties:
+        state: {type: string, enum: [found, missing, unreadable, ambiguous, conflict], description: Original machine state even after correction}
+        value: {oneOf: [{$ref: '#/components/schemas/BusinessFieldValue'}, {type: 'null'}]}
+        confidence: {type: 'null', description: Uncalibrated; detector scores and model self-ratings are not field correctness probabilities}
+        confidence_kind: {type: string, const: uncalibrated_extraction}
+        reason_codes: {type: array, uniqueItems: true, items: {type: string}}
+        candidates:
+          type: array
+          items:
+            type: object
+            required: [value, origins, methods, evidence_refs]
+            properties:
+              value: {$ref: '#/components/schemas/BusinessFieldValue'}
+              origins: {type: array, uniqueItems: true, items: {type: string}}
+              methods: {type: array, uniqueItems: true, items: {type: string}}
+              evidence_refs: {type: array, uniqueItems: true, items: {type: string}}
+        evidence_refs: {type: array, uniqueItems: true, items: {type: string}}
+        approval: {type: string, enum: [requires_review, human_corrected_requires_review, human_approved]}
+        correction: {oneOf: [{$ref: '#/components/schemas/ReviewCorrection'}, {type: 'null'}]}
+    BusinessFieldValue:
+      oneOf:
+        - type: object
+          required: [type, value]
+          properties:
+            type: {type: string, enum: [text, identifier, date]}
+            value: {type: string}
+        - type: object
+          required: [type, amount, currency, period]
+          properties:
+            type: {type: string, const: money}
+            amount: {type: string}
+            currency: {type: string}
+            period: {type: [string, 'null']}
+        - type: object
+          required: [type, amount, unit]
+          properties:
+            type: {type: string, const: area}
+            amount: {type: string}
+            unit: {type: string}
+    ReviewCorrection:
+      type: object
+      additionalProperties: false
+      required: [value, evidence_refs]
+      properties:
+        value: {$ref: '#/components/schemas/BusinessFieldValue'}
+        evidence_refs: {type: array, minItems: 1, maxItems: 32, uniqueItems: true, items: {type: string, pattern: '^ev_[0-9a-f]{64}$'}}
+    ReviewRequest:
+      type: object
+      additionalProperties: false
+      required: [request_id, expected_revision, action, reason]
+      properties:
+        request_id: {type: string, format: uuid, description: Non-nil UUID identifying an immutable canonical request}
+        expected_revision: {type: integer, minimum: 0, maximum: 9999}
+        action: {type: string, enum: [correct, approve, reject, reopen]}
+        reason: {type: string, minLength: 1, maxLength: 2000, description: Maximum 2000 UTF-8 bytes}
+        corrections: {type: object, maxProperties: 64, additionalProperties: {$ref: '#/components/schemas/ReviewCorrection'}, description: 1..64 corrections for correct action; empty for other actions}
+    ReviewSnapshot:
+      type: object
+      required: [revision, status, corrections, principal, decided_at]
+      properties:
+        revision: {type: integer, minimum: 0}
+        status: {type: string, enum: [needs_review, approved, rejected]}
+        corrections: {type: object, additionalProperties: {$ref: '#/components/schemas/ReviewCorrection'}}
+        principal: {type: [string, 'null'], description: Configured authenticated review service principal, not asserted human identity}
+        decided_at: {type: [string, 'null'], format: date-time}
+    ReviewEvent:
+      type: object
+      required: [revision, request_id, principal, action, reason, request, status, created_at]
+      properties:
+        revision: {type: integer, minimum: 1}
+        request_id: {type: string, format: uuid}
+        principal: {type: string}
+        action: {type: string, enum: [correct, approve, reject, reopen]}
+        reason: {type: string}
+        request: {$ref: '#/components/schemas/ReviewRequest'}
+        status: {type: string, enum: [needs_review, approved, rejected]}
+        created_at: {type: string, format: date-time}
+    Job:
+      type: object
+      required: [id, filename, media_type, sha256, status, attempts, created_at, updated_at, result, error]
+      properties:
+        id: {type: string, format: uuid}
+        filename: {type: string, description: Sanitized display metadata}
+        media_type: {type: string, enum: [application/pdf, image/png, image/jpeg, image/webp]}
+        extraction_profile: {type: string, enum: [none, vi_rental_contract_v1], default: none}
+        sha256: {type: string, pattern: '^[0-9a-f]{64}$', description: SHA-256 of original uploaded bytes}
+        status: {type: string, enum: [queued, processing, succeeded, failed]}
+        attempts: {type: integer, minimum: 0}
+        created_at: {type: string, format: date-time}
+        updated_at: {type: string, format: date-time, description: Last state change or lease renewal}
+        result:
+          oneOf:
+            - {$ref: '#/components/schemas/OcrResult'}
+            - {type: 'null'}
+        error: {type: [string, 'null'], description: Sanitized most recent failure; may remain while a retry is queued}
+    OcrResult:
+      oneOf:
+        - {$ref: '#/components/schemas/CourseLayoutResult'}
+        - {$ref: '#/components/schemas/FullPageResult'}
+      discriminator:
+        propertyName: strategy
+        mapping:
+          course_layout_vlm: '#/components/schemas/CourseLayoutResult'
+          full_page_vlm: '#/components/schemas/FullPageResult'
+    CourseLayoutResult:
+      type: object
+      description: >-
+        Default strategy. Rust detects learned reading order and mask polygons,
+        recognizes Text/Table/Formula crops, and applies the SDK 0.1.4 formatter
+        port. Course-policy charts/images are skipped by default. The image OCR
+        override recognizes only outermost image/chart containers and keeps
+        nested regions as placeholders. Abandoned classes remain in page audit
+        data. This schema describes current results; earlier stored all-image
+        outputs may lack the policy fields. Completion does not establish OCR
+        or business-field accuracy.
+      required: [strategy, model, prompt_version, formatter_version, layout_model, layout_profile, image_ocr_override, rendering, page_numbering, max_output_tokens, pdf_render_dpi, page_max_edge, max_image_edge, pages, layout, markdown, source]
+      properties:
+        strategy: {type: string, const: course_layout_vlm}
+        model: {type: string, description: Recognition server's served model name}
+        prompt_version: {type: string, const: course-regions-sdk-0.1.4-v1}
+        formatter_version: {type: string, const: sdk-0.1.4-rust-v1}
+        layout_model:
+          type: object
+          required: [id, revision, onnx_sha256, engine]
+          properties:
+            id: {type: string, const: PaddlePaddle/PP-DocLayoutV3_safetensors}
+            revision: {type: string, const: e4f489dc536556fc1be02b973ba06756e0d4a2ac}
+            onnx_sha256: {type: string, pattern: '^[0-9a-fA-F]{64}$'}
+            engine: {type: string, const: rust_onnxruntime}
+        layout_profile:
+          type: string
+          enum: [course-root-sdk-0.1.4, course-root-sdk-0.1.4+image-text, course-root-sdk-0.1.4+table-padding, course-root-sdk-0.1.4+image-text+table-padding]
+          description: Strict course profile or explicit image-text, table-padding, or combined enhancements
+        image_ocr_override:
+          type: boolean
+          description: OCR_RECOGNIZE_IMAGES; false by default, true sends outermost detected chart/image containers to the Text prompt while nested regions remain skipped
+        image_ocr_policy:
+          type: object
+          required: [name, containment_threshold]
+          properties:
+            name:
+              type: string
+              enum: [course_skip_all, outermost_containers_v1]
+              description: course_skip_all when image OCR is disabled; outermost_containers_v1 when enabled
+            containment_threshold:
+              type: number
+              const: 0.98
+              description: Skip an image/chart region when at least 98 percent of its normalized bounding-box area is covered by a larger image/chart container; equal areas select the earlier detection index. Inactive under course_skip_all.
+        recognition_preprocessing:
+          type: object
+          required: [table_crop_padding_pixels, padding_color, padding_stage]
+          properties:
+            table_crop_padding_pixels:
+              type: integer
+              minimum: 0
+              maximum: 512
+              description: TABLE_CROP_PADDING_PIXELS; white border on each side of Table crops only, default 0, macOS example 112. Final padded edge must be at most 8192 pixels.
+            padding_color: {type: string, const: white}
+            padding_stage: {type: string, const: after_course_crop_resize_before_jpeg}
+        rendering:
+          type: object
+          required: [engine, page_box, image_orientation]
+          properties:
+            engine: {type: string, const: poppler}
+            page_box: {type: string, const: CropBox}
+            image_orientation: {type: string, const: EXIF applied before layout}
+        page_numbering: {type: string, const: 'one_based_pages; zero_based_markdown_image_refs'}
+        max_output_tokens: {type: integer, minimum: 1, description: Per recognition request}
+        pdf_render_dpi: {type: integer, minimum: 36, maximum: 600, description: Configured upper DPI; effective rendering also obeys page/pixel bounds}
+        page_max_edge: {type: integer, minimum: 32, maximum: 8192}
+        max_image_edge: {type: integer, minimum: 112, maximum: 8192, description: Recognition crop edge bound before optional Table padding}
+        pages:
+          type: array
+          items: {$ref: '#/components/schemas/LayoutPage'}
+        layout:
+          type: array
+          description: Formatted regions grouped in page order; same region arrays as pages[].regions
+          items:
+            type: array
+            items: {$ref: '#/components/schemas/LayoutRegion'}
+        markdown:
+          type: string
+          description: SDK-style formatted page text; image placeholders use zero-based page references and normalized boxes
+        source: {$ref: '#/components/schemas/SourceMetadata'}
+        execution: {$ref: '#/components/schemas/ExecutionMetadata'}
+        recovery: {$ref: '#/components/schemas/RecoveryObservations'}
+        post_processing: {$ref: '#/components/schemas/PostProcessing'}
+        extraction: {$ref: '#/components/schemas/RentalExtraction'}
+    FullPageResult:
+      type: object
+      description: Explicit legacy strategy, selected by the canned CPU demo; one recognition request per page without layout detection
+      required: [strategy, model, prompt_version, max_output_tokens, max_image_edge, pages, markdown]
+      properties:
+        strategy: {type: string, const: full_page_vlm}
+        model: {type: string}
+        prompt_version: {type: string, const: fullpage-v1}
+        max_output_tokens: {type: integer}
+        max_image_edge: {type: integer}
+        pages:
+          type: array
+          items: {$ref: '#/components/schemas/FullPage'}
+        markdown: {type: string, description: Page text joined with Markdown separators}
+        source: {$ref: '#/components/schemas/SourceMetadata'}
+        execution: {$ref: '#/components/schemas/ExecutionMetadata'}
+        post_processing: {$ref: '#/components/schemas/PostProcessing'}
+        extraction: {$ref: '#/components/schemas/RentalExtraction'}
+    ExecutionMetadata:
+      type: object
+      description: Worker configuration at execution time; the deployment fingerprint is operator declared, not independent attestation of server weights
+      required: [inference_revision, revision_kind, worker_concurrency, region_concurrency, layout_pool_size, region_checkpoints_enabled]
+      properties:
+        inference_revision: {type: string}
+        revision_kind: {type: string, const: operator_declared_deployment_fingerprint}
+        worker_concurrency: {type: integer, minimum: 1}
+        region_concurrency: {type: integer, minimum: 1}
+        layout_pool_size: {type: integer, minimum: 1, maximum: 8}
+        region_checkpoints_enabled: {type: boolean}
+    RecoveryObservations:
+      type: object
+      required: [policy, maximum_regions, attempted_regions, observations, limitations]
+      properties:
+        policy: {type: string, const: bounded_expanded_crop_v1}
+        maximum_regions: {type: integer, minimum: 0, maximum: 16}
+        attempted_regions: {type: integer, minimum: 0, maximum: 16}
+        limitations: {type: array, items: {type: string}}
+        observations:
+          type: array
+          maxItems: 16
+          items:
+            type: object
+            required: [page_number, detector_region_index, bbox_2d, trigger, method, status, automatically_selected, original_unchanged]
+            properties:
+              page_number: {type: integer, minimum: 1}
+              detector_region_index: {type: integer, minimum: 0}
+              bbox_2d: {$ref: '#/components/schemas/NormalizedBox'}
+              trigger: {type: string, enum: [empty_recognition, suspect_vietnamese_phrase]}
+              method: {type: string, const: expanded_crop_v1}
+              status: {type: string, enum: [observed, failed]}
+              content: {type: string}
+              expansion_pixels: {type: integer, minimum: 1, maximum: 128}
+              confidence: {type: 'null'}
+              automatically_selected: {type: boolean, const: false}
+              original_unchanged: {type: boolean, const: true}
+              retryable: {type: boolean}
+              error: {type: string}
+    PostProcessing:
+      type: object
+      description: Additive profile output. Raw layout and Markdown are unchanged; native PDF alternatives are unverified and require review.
+      required: [version, profile, original_sha256, blocks, source_text_sha256, markdown, native_pdf, issues]
+      properties:
+        version: {type: string, const: evidence-postprocess-v1}
+        profile: {type: string, const: vi_rental_contract_v1}
+        original_sha256: {type: string, pattern: '^[0-9a-f]{64}$'}
+        blocks:
+          type: array
+          items: {$ref: '#/components/schemas/ExtractionSourceBlock'}
+        source_text_sha256:
+          type: object
+          additionalProperties: {type: string, pattern: '^[0-9a-f]{64}$'}
+        markdown: {type: string, description: Selected native-text or OCR blocks joined for review; not a verified corrected transcription}
+        native_pdf: {type: object, description: Per-page bidirectional token-agreement screening; confidence null and pixel_verified false}
+        native_comparison: {type: object, description: Native alternatives, OCR coverage gaps and original native blocks with geometry; automatic_raw_text_rewrites is zero}
+        raw_ocr_quality: {type: object, description: Original OCR blocks and review issues including low detector scores and suspect phrases}
+        issues: {type: array, items: {type: object}}
+    ExtractionSourceBlock:
+      type: object
+      required: [id, page_number, region_index, source, text, bbox_2d, detector_score]
+      properties:
+        id: {type: string, minLength: 1}
+        page_number: {type: integer, minimum: 1}
+        region_index: {type: [integer, 'null'], minimum: 0}
+        source: {type: string, enum: [ocr, native_pdf, ocr_recovery_context]}
+        text: {type: string}
+        bbox_2d:
+          oneOf:
+            - {$ref: '#/components/schemas/NormalizedBox'}
+            - {type: 'null'}
+        detector_score: {type: [number, 'null'], minimum: 0, maximum: 1, description: Layout detection only; not OCR/field confidence}
+    RentalExtraction:
+      type: object
+      description: Versioned scoped KIE proposals; see schemas/rental-extraction-v1.schema.json for the full typed evidence contract. No automatic business acceptance or signature verification.
+      required: [schema_version, profile_version, normalizer_version, policy_version, supported_template, decision, source_blocks, parties, fields, identity_documents, issues, limitations]
+      properties:
+        schema_version: {type: string, const: rental-extraction/1.0.0}
+        profile_version: {type: string, const: vi_rental_contract_v1}
+        normalizer_version: {type: string, const: vi_conservative/1.0.0}
+        policy_version: {type: string, const: review_all_uncalibrated/1.0.0}
+        supported_template: {type: boolean}
+        decision: {type: string, const: needs_review}
+        source_blocks: {type: array, items: {type: object}}
+        parties: {type: array, items: {type: object}, description: Evidence-backed roles, separate contract/identity observations and aggregated conflicts}
+        fields: {type: object, description: Monthly rent, deposit, property address and area typed fields}
+        identity_documents: {type: array, items: {type: object}, description: Front/back scopes linked only by an exact unambiguous identifier}
+        issues: {type: array, items: {type: object}}
+        limitations: {type: array, items: {type: string}}
+    SourceMetadata:
+      type: object
+      description: Original bytes are retained for successful course jobs until terminal pruning and are accessible through the authenticated source artifact endpoint
+      required: [sha256, media_type, original_retained, retention_days]
+      properties:
+        sha256: {type: string, pattern: '^[0-9a-f]{64}$'}
+        media_type: {type: string, enum: [application/pdf, image/png, image/jpeg, image/webp]}
+        original_retained: {type: boolean, description: True for course_layout_vlm or extraction jobs; legacy full_page_vlm without extraction clears original bytes}
+        retention_days: {type: integer, minimum: 1, maximum: 3650, description: Terminal retention policy; default 7 days, pruned in bounded batches by a running worker}
+    FullPage:
+      type: object
+      required: [page_number, markdown, empty]
+      properties:
+        page_number: {type: integer, minimum: 1}
+        markdown: {type: string}
+        empty: {type: boolean, description: Model returned empty/whitespace text; not proof of a blank source page}
+    LayoutPage:
+      type: object
+      required: [page_number, width, height, coordinate_system, empty, markdown, regions, coverage, detections, discarded, raw_regions, warnings]
+      properties:
+        page_number: {type: integer, minimum: 1}
+        width: {type: integer, minimum: 1, description: Upright rendered page width in pixels}
+        height: {type: integer, minimum: 1, description: Upright rendered page height in pixels}
+        coordinate_system: {type: string, const: normalized_0_1000}
+        empty: {type: boolean, description: Generated page Markdown is empty; skipped images can generate placeholders, and this is not proof of a blank source}
+        markdown: {type: string}
+        regions:
+          type: array
+          description: Formatted regions in learned order, after SDK cleanup and merges
+          items: {$ref: '#/components/schemas/LayoutRegion'}
+        coverage: {$ref: '#/components/schemas/Coverage'}
+        detections:
+          type: array
+          description: Retained detector regions, including skipped chart/image classes
+          items: {$ref: '#/components/schemas/DetectionRegion'}
+        discarded:
+          type: array
+          description: Course-policy abandoned classes, including headers and footers; no recognition calls
+          items: {$ref: '#/components/schemas/DetectionRegion'}
+        raw_regions:
+          type: array
+          description: Recognition results before formatting/merges; arrival order may differ from reading_order
+          items: {$ref: '#/components/schemas/LayoutRegion'}
+        image_ocr_skipped_nested_regions:
+          type: array
+          uniqueItems: true
+          maxItems: 300
+          items: {type: integer, minimum: 0, maximum: 299}
+          description: Sorted original detection-list indices skipped by outermost_containers_v1; these retain placeholders and null raw content with task_type skip. Empty when image OCR is disabled. These are not formatted-region indices.
+        warnings:
+          type: array
+          items: {type: string}
+    Coverage:
+      type: object
+      required: [detected_regions, ocr_attempted_regions, skipped_regions, abandoned_regions, empty_model_responses]
+      properties:
+        detected_regions: {type: integer, minimum: 0, description: Retained plus abandoned detector regions}
+        ocr_attempted_regions: {type: integer, minimum: 0}
+        skipped_regions: {type: integer, minimum: 0, description: Chart/image regions without recognition; includes nested regions under outermost_containers_v1 and can remain nonzero with image OCR enabled}
+        abandoned_regions: {type: integer, minimum: 0}
+        empty_model_responses: {type: integer, minimum: 0, description: Present recognition content containing only whitespace}
+    LayoutRegion:
+      type: object
+      required: [index, label, native_label, content, raw_content, bbox_2d, polygon, score, reading_order, task_type, polygon_source]
+      properties:
+        index: {type: integer, minimum: 0, description: Formatted sequence index, or original detection-list index in raw_regions}
+        label: {type: string, description: Formatted SDK label; raw_regions retain the native label}
+        native_label: {type: string, description: Original detector class label}
+        content: {type: [string, 'null'], description: Formatted content; null for a skipped image}
+        raw_content: {type: [string, 'null'], description: Model content before formatter cleanup}
+        bbox_2d: {$ref: '#/components/schemas/NormalizedBox'}
+        polygon: {$ref: '#/components/schemas/NormalizedPolygon'}
+        score: {type: number, minimum: 0, maximum: 1, description: Layout detection score; not confidence in recognized text or business fields}
+        reading_order: {type: integer, minimum: 0, maximum: 299, description: Learned V3 query rank, preserved through filtering and formatting}
+        task_type: {type: string, enum: [text, table, formula, skip, abandon, image_text]}
+        polygon_source: {type: string, description: Mask geometry or recorded rectangle fallback when the mask is empty}
+    DetectionRegion:
+      type: object
+      required: [index, class_id, label, task, bbox, bbox_2d, polygon, polygon_source, score, reading_order]
+      properties:
+        index: {type: integer, minimum: 0, maximum: 299, description: Sequence index within the retained or discarded list}
+        class_id: {type: integer, minimum: 0, maximum: 24}
+        label: {type: string, description: Native PP-DocLayoutV3 class label}
+        task: {type: string, enum: [text, table, formula, skip, abandon]}
+        bbox:
+          type: array
+          minItems: 4
+          maxItems: 4
+          items: {type: number}
+          description: Raw [left, top, right, bottom] model box in upright page pixels; may extend outside the page
+        bbox_2d: {$ref: '#/components/schemas/NormalizedBox'}
+        polygon: {$ref: '#/components/schemas/NormalizedPolygon'}
+        polygon_source: {type: string}
+        score: {type: number, minimum: 0, maximum: 1, description: Layout detection score; not confidence in recognized text or business fields}
+        reading_order: {type: integer, minimum: 0, maximum: 299}
+    NormalizedBox:
+      type: array
+      minItems: 4
+      maxItems: 4
+      items: {type: integer, minimum: 0, maximum: 1000}
+      description: '[left, top, right, bottom], clipped and quantized to the upright page frame 0–1000'
+    NormalizedPolygon:
+      type: array
+      minItems: 3
+      maxItems: 4096
+      description: Mask polygon in the upright page frame 0–1000
+      items:
+        type: array
+        minItems: 2
+        maxItems: 2
+        items: {type: integer, minimum: 0, maximum: 1000}
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message]
+          properties:
+            code: {type: string}
+            message: {type: string}
+  responses:
+    BadRequest:
+      description: Malformed upload, key, or job UUID
+      content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}
+    Unauthorized:
+      description: Missing or invalid service token
+      content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}
+    NotFound:
+      description: Job missing or expired
+      content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}
+    UploadTimeout:
+      description: Upload deadline exceeded
+      content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}
+    IdempotencyConflict:
+      description: Key reused with different content, media type or extraction profile
+      content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}
+    TooLarge:
+      description: File or multipart body exceeds configured size limit
+      content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}
+    UnsupportedMediaType:
+      description: Signature is not PDF, PNG, JPEG, or WebP
+      content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}
+    AtCapacity:
+      description: Upload, response body/byte or durable nonterminal queue capacity is busy; retry with backoff
+      headers:
+        Retry-After: {schema: {type: integer, const: 1}, description: Minimum suggested retry delay in seconds}
+      content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}
+    ResponseLimitExceeded:
+      description: Stored uncompressed result/source or serialized response exceeds configured limit; error.code is response_limit_exceeded. Stored JSON text and final serde wire bytes have independent checks.
+      content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}
+    StorageUnavailable:
+      description: Temporary database error, enqueue_timeout or operation_timeout; outcome may be unknown for mutations. Retry with the same Idempotency-Key or review request_id.
+      headers:
+        Retry-After: {schema: {type: integer, const: 1}, description: Minimum suggested retry delay in seconds}
+      content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}

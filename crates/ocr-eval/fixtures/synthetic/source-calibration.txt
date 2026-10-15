@@ -1,0 +1,6 @@
+Synthetic evaluator mechanics fixture: calibration
+Landlord date: 01/01/1980
+Tenant contract date: 02/02/2000
+Tenant attachment date: 03/03/2001
+Rent: 1000000 VND/month
+Deposit: not present

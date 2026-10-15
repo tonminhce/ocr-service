@@ -1,0 +1,27 @@
+[package]
+name = "ocr-eval"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+ocr-core = { path = "../ocr-core" }
+ocr-extraction = { path = "../ocr-extraction" }
+anyhow.workspace = true
+chrono.workspace = true
+futures-util.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+tokio.workspace = true
+uuid.workspace = true
+unicode-normalization = "0.1"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[dev-dependencies]
+tempfile.workspace = true
+axum.workspace = true

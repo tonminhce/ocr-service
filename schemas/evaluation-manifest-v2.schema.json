@@ -1,0 +1,1021 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "normalization_policy",
+    "dataset_name",
+    "synthetic",
+    "cases"
+  ],
+  "properties": {
+    "schema_version": {
+      "enum": [
+        "ocr-eval-manifest/2.0.0"
+      ]
+    },
+    "normalization_policy": {
+      "enum": [
+        "nfc-typed/1.0.0"
+      ]
+    },
+    "dataset_name": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_.-]{1,128}$"
+    },
+    "synthetic": {
+      "type": "boolean"
+    },
+    "cases": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/case"
+      },
+      "minItems": 1,
+      "maxItems": 1000
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:ocr-service:evaluation-manifest:2.0.0",
+  "title": "Independent source-grounded OCR evaluation v2",
+  "description": "Rust loader additionally validates source/artifact hashes, graph references, typed values, page-contained simple convex polygons, independent critical-label provenance and split isolation. Prediction sidecar schema is available at #/$defs/prediction. Declared provenance cannot prove human independence or pixel truth.",
+  "$defs": {
+    "page": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "number",
+        "width",
+        "height",
+        "rotation_degrees",
+        "crop_box_pdf"
+      ],
+      "properties": {
+        "number": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 4294967295
+        },
+        "width": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 32768
+        },
+        "height": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 32768
+        },
+        "rotation_degrees": {
+          "enum": [
+            0,
+            90,
+            180,
+            270
+          ]
+        },
+        "crop_box_pdf": {
+          "type": "array",
+          "items": {
+            "type": "number"
+          },
+          "minItems": 4,
+          "maxItems": 4
+        }
+      }
+    },
+    "anchor": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "page_number",
+        "source_kind",
+        "side",
+        "granularity",
+        "polygon"
+      ],
+      "properties": {
+        "page_number": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 4294967295
+        },
+        "source_kind": {
+          "enum": [
+            "contract",
+            "identity_card",
+            "attachment",
+            "other"
+          ]
+        },
+        "side": {
+          "enum": [
+            "front",
+            "back",
+            "not_applicable"
+          ]
+        },
+        "granularity": {
+          "enum": [
+            "word",
+            "line",
+            "block"
+          ]
+        },
+        "polygon": {
+          "type": "array",
+          "items": {
+            "type": "array",
+            "items": {
+              "type": "number"
+            },
+            "minItems": 2,
+            "maxItems": 2
+          },
+          "minItems": 3,
+          "maxItems": 16
+        }
+      }
+    },
+    "entity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "kind",
+        "document_id",
+        "party_id",
+        "role",
+        "anchor"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_.-]{1,128}$"
+        },
+        "kind": {
+          "enum": [
+            "document",
+            "party",
+            "card"
+          ]
+        },
+        "document_id": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9_.-]{1,128}$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "party_id": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9_.-]{1,128}$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "role": {
+          "anyOf": [
+            {
+              "enum": [
+                "landlord",
+                "tenant",
+                "unknown"
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "anchor": {
+          "$ref": "#/$defs/anchor"
+        }
+      }
+    },
+    "value": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "value"
+          ],
+          "properties": {
+            "type": {
+              "enum": [
+                "text"
+              ]
+            },
+            "value": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 4096
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "value"
+          ],
+          "properties": {
+            "type": {
+              "enum": [
+                "identifier"
+              ]
+            },
+            "value": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "value"
+          ],
+          "properties": {
+            "type": {
+              "enum": [
+                "date"
+              ]
+            },
+            "value": {
+              "type": "string",
+              "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "amount",
+            "currency",
+            "period"
+          ],
+          "properties": {
+            "type": {
+              "enum": [
+                "money"
+              ]
+            },
+            "amount": {
+              "type": "string",
+              "pattern": "^[0-9]+(\\.[0-9]+)?$",
+              "maxLength": 32
+            },
+            "currency": {
+              "enum": [
+                "VND"
+              ]
+            },
+            "period": {
+              "anyOf": [
+                {
+                  "enum": [
+                    "month"
+                  ]
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "amount",
+            "unit"
+          ],
+          "properties": {
+            "type": {
+              "enum": [
+                "area"
+              ]
+            },
+            "amount": {
+              "type": "string",
+              "pattern": "^[0-9]+(\\.[0-9]+)?$",
+              "maxLength": 32
+            },
+            "unit": {
+              "enum": [
+                "m2"
+              ]
+            }
+          }
+        }
+      ]
+    },
+    "span": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "transcript_id",
+        "byte_start",
+        "byte_end",
+        "quote_sha256"
+      ],
+      "properties": {
+        "transcript_id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_.-]{1,128}$"
+        },
+        "byte_start": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "byte_end": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "quote_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        }
+      }
+    },
+    "observation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "document_id",
+        "party_id",
+        "card_id",
+        "field",
+        "state",
+        "origin",
+        "visible_text",
+        "value",
+        "anchor",
+        "evidence"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_.-]{1,128}$"
+        },
+        "document_id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_.-]{1,128}$"
+        },
+        "party_id": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9_.-]{1,128}$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "card_id": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9_.-]{1,128}$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "field": {
+          "enum": [
+            "name",
+            "id_number",
+            "birth_date",
+            "issue_date",
+            "residence_address",
+            "contact_address",
+            "phone",
+            "bank_account",
+            "monthly_rent",
+            "deposit_amount",
+            "property_address",
+            "property_area"
+          ]
+        },
+        "state": {
+          "enum": [
+            "present",
+            "source_blank",
+            "unreadable",
+            "placeholder",
+            "unsupported"
+          ]
+        },
+        "origin": {
+          "enum": [
+            "first_pass",
+            "recovery",
+            "human_gold"
+          ]
+        },
+        "visible_text": {
+          "type": "string",
+          "maxLength": 4096
+        },
+        "value": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/value"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "anchor": {
+          "$ref": "#/$defs/anchor"
+        },
+        "evidence": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/span"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    },
+    "goldObservation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "document_id",
+        "party_id",
+        "card_id",
+        "field",
+        "state",
+        "origin",
+        "visible_text",
+        "value",
+        "anchor",
+        "evidence"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_.-]{1,128}$"
+        },
+        "document_id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_.-]{1,128}$"
+        },
+        "party_id": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9_.-]{1,128}$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "card_id": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9_.-]{1,128}$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "field": {
+          "enum": [
+            "name",
+            "id_number",
+            "birth_date",
+            "issue_date",
+            "residence_address",
+            "contact_address",
+            "phone",
+            "bank_account",
+            "monthly_rent",
+            "deposit_amount",
+            "property_address",
+            "property_area"
+          ]
+        },
+        "state": {
+          "enum": [
+            "present",
+            "source_blank",
+            "unreadable",
+            "placeholder",
+            "unsupported"
+          ]
+        },
+        "origin": {
+          "enum": [
+            "human_gold"
+          ]
+        },
+        "visible_text": {
+          "type": "string",
+          "maxLength": 4096
+        },
+        "value": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/value"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "anchor": {
+          "$ref": "#/$defs/anchor"
+        },
+        "evidence": {
+          "type": "null"
+        }
+      }
+    },
+    "predictionObservation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "document_id",
+        "party_id",
+        "card_id",
+        "field",
+        "state",
+        "origin",
+        "visible_text",
+        "value",
+        "anchor",
+        "evidence"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_.-]{1,128}$"
+        },
+        "document_id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_.-]{1,128}$"
+        },
+        "party_id": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9_.-]{1,128}$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "card_id": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9_.-]{1,128}$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "field": {
+          "enum": [
+            "name",
+            "id_number",
+            "birth_date",
+            "issue_date",
+            "residence_address",
+            "contact_address",
+            "phone",
+            "bank_account",
+            "monthly_rent",
+            "deposit_amount",
+            "property_address",
+            "property_area"
+          ]
+        },
+        "state": {
+          "enum": [
+            "present",
+            "source_blank",
+            "unreadable",
+            "placeholder",
+            "unsupported"
+          ]
+        },
+        "origin": {
+          "enum": [
+            "first_pass",
+            "recovery"
+          ]
+        },
+        "visible_text": {
+          "type": "string",
+          "maxLength": 4096
+        },
+        "value": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/value"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "anchor": {
+          "$ref": "#/$defs/anchor"
+        },
+        "evidence": {
+          "$ref": "#/$defs/span"
+        }
+      }
+    },
+    "field": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "document_id",
+        "party_id",
+        "field",
+        "state",
+        "observation_ids",
+        "ambiguity_reason"
+      ],
+      "properties": {
+        "document_id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_.-]{1,128}$"
+        },
+        "party_id": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9_.-]{1,128}$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "field": {
+          "enum": [
+            "name",
+            "id_number",
+            "birth_date",
+            "issue_date",
+            "residence_address",
+            "contact_address",
+            "phone",
+            "bank_account",
+            "monthly_rent",
+            "deposit_amount",
+            "property_address",
+            "property_area"
+          ]
+        },
+        "state": {
+          "enum": [
+            "found",
+            "conflict",
+            "ambiguous",
+            "missing",
+            "source_blank",
+            "unreadable",
+            "placeholder",
+            "unsupported"
+          ]
+        },
+        "observation_ids": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9_.-]{1,128}$"
+          },
+          "minItems": 0,
+          "maxItems": 32,
+          "uniqueItems": true
+        },
+        "ambiguity_reason": {
+          "anyOf": [
+            {
+              "enum": [
+                "recovery_only",
+                "uncertain_source"
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    },
+    "annotation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "annotator_ids",
+        "prediction_hidden",
+        "pixels_checked",
+        "adjudicated",
+        "adjudicator_id"
+      ],
+      "properties": {
+        "annotator_ids": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9_.-]{1,128}$"
+          },
+          "minItems": 1,
+          "maxItems": 8,
+          "uniqueItems": true
+        },
+        "prediction_hidden": {
+          "enum": [
+            true
+          ]
+        },
+        "pixels_checked": {
+          "enum": [
+            true
+          ]
+        },
+        "adjudicated": {
+          "type": "boolean"
+        },
+        "adjudicator_id": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9_.-]{1,128}$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    },
+    "goldField": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "target",
+        "critical",
+        "annotation"
+      ],
+      "properties": {
+        "target": {
+          "$ref": "#/$defs/field"
+        },
+        "critical": {
+          "type": "boolean"
+        },
+        "annotation": {
+          "$ref": "#/$defs/annotation"
+        }
+      }
+    },
+    "transcript": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "text",
+        "anchor"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_.-]{1,128}$"
+        },
+        "text": {
+          "type": "string",
+          "maxLength": 65536
+        },
+        "anchor": {
+          "$ref": "#/$defs/anchor"
+        }
+      }
+    },
+    "case": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "group_id",
+        "template_family",
+        "split",
+        "cohort",
+        "quality",
+        "source_sha256",
+        "source_path",
+        "prediction_path",
+        "prediction_sha256",
+        "pages",
+        "entities",
+        "observations",
+        "fields"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_.-]{1,128}$"
+        },
+        "group_id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_.-]{1,128}$"
+        },
+        "template_family": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_.-]{1,128}$"
+        },
+        "split": {
+          "enum": [
+            "dev",
+            "calibration",
+            "test"
+          ]
+        },
+        "cohort": {
+          "enum": [
+            "representative",
+            "challenge",
+            "unseen_template"
+          ]
+        },
+        "quality": {
+          "enum": [
+            "native",
+            "scan",
+            "camera",
+            "mixed"
+          ]
+        },
+        "source_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "source_path": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096,
+          "description": "Relative path without traversal. Rust loader enforces canonical path confinement and regular-file byte limits."
+        },
+        "prediction_path": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096,
+          "description": "Relative path without traversal. Rust loader enforces canonical path confinement and regular-file byte limits."
+        },
+        "prediction_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "pages": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/page"
+          },
+          "minItems": 1,
+          "maxItems": 1000
+        },
+        "entities": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/entity"
+          },
+          "minItems": 1,
+          "maxItems": 32
+        },
+        "observations": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/goldObservation"
+          },
+          "minItems": 0,
+          "maxItems": 1024
+        },
+        "fields": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/goldField"
+          },
+          "minItems": 1,
+          "maxItems": 256
+        }
+      }
+    },
+    "prediction": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "normalization_policy",
+        "source_sha256",
+        "machine_only",
+        "pages",
+        "entities",
+        "transcripts",
+        "observations",
+        "fields"
+      ],
+      "properties": {
+        "schema_version": {
+          "enum": [
+            "ocr-eval-prediction/2.0.0"
+          ]
+        },
+        "normalization_policy": {
+          "enum": [
+            "nfc-typed/1.0.0"
+          ]
+        },
+        "source_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "machine_only": {
+          "enum": [
+            true
+          ]
+        },
+        "pages": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/page"
+          },
+          "minItems": 1,
+          "maxItems": 1000
+        },
+        "entities": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/entity"
+          },
+          "minItems": 1,
+          "maxItems": 32
+        },
+        "transcripts": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/transcript"
+          },
+          "minItems": 0,
+          "maxItems": 2048
+        },
+        "observations": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/predictionObservation"
+          },
+          "minItems": 0,
+          "maxItems": 1024
+        },
+        "fields": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/field"
+          },
+          "minItems": 1,
+          "maxItems": 256
+        }
+      }
+    }
+  }
+}

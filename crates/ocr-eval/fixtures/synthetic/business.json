@@ -1,0 +1,207 @@
+{
+  "schema_version": "ocr-business/1.0.0",
+  "job_id": "00000000-0000-0000-0000-000000000000",
+  "source_sha256": null,
+  "extraction_profile": "vi_rental_contract_v1",
+  "supported_template": true,
+  "machine_decision": "needs_review",
+  "review": {
+    "revision": 0,
+    "status": "needs_review",
+    "corrections": {},
+    "principal": null,
+    "decided_at": null
+  },
+  "parties": [
+    {
+      "id": "party-b",
+      "role": "tenant",
+      "field_prefix": "tenant",
+      "role_evidence_refs": [
+        "ev_03cee5700d11b6c6f8b5cd5c763b8f07425cb28d9c86ad83058d339831d38f41"
+      ]
+    }
+  ],
+  "fields": {
+    "deposit_amount": {
+      "state": "found",
+      "value": {
+        "type": "money",
+        "amount": "500000",
+        "currency": "VND",
+        "period": null
+      },
+      "confidence": null,
+      "confidence_kind": "uncalibrated_extraction",
+      "reason_codes": [
+        "confidence_uncalibrated"
+      ],
+      "candidates": [
+        {
+          "value": {
+            "type": "money",
+            "amount": "500000",
+            "currency": "VND",
+            "period": null
+          },
+          "origins": [
+            "fixture"
+          ],
+          "methods": [
+            "synthetic_fixture"
+          ],
+          "evidence_refs": [
+            "ev_03cee5700d11b6c6f8b5cd5c763b8f07425cb28d9c86ad83058d339831d38f41"
+          ]
+        }
+      ],
+      "evidence_refs": [
+        "ev_03cee5700d11b6c6f8b5cd5c763b8f07425cb28d9c86ad83058d339831d38f41"
+      ],
+      "approval": "requires_review",
+      "correction": null
+    },
+    "landlord.birth_date": {
+      "state": "found",
+      "value": {
+        "type": "date",
+        "value": "1980-01-01"
+      },
+      "confidence": null,
+      "confidence_kind": "uncalibrated_extraction",
+      "reason_codes": [
+        "confidence_uncalibrated"
+      ],
+      "candidates": [
+        {
+          "value": {
+            "type": "date",
+            "value": "1980-01-01"
+          },
+          "origins": [
+            "fixture"
+          ],
+          "methods": [
+            "synthetic_fixture"
+          ],
+          "evidence_refs": [
+            "ev_03cee5700d11b6c6f8b5cd5c763b8f07425cb28d9c86ad83058d339831d38f41"
+          ]
+        }
+      ],
+      "evidence_refs": [
+        "ev_03cee5700d11b6c6f8b5cd5c763b8f07425cb28d9c86ad83058d339831d38f41"
+      ],
+      "approval": "requires_review",
+      "correction": null
+    },
+    "monthly_rent": {
+      "state": "found",
+      "value": {
+        "type": "money",
+        "amount": "1200000",
+        "currency": "VND",
+        "period": "month"
+      },
+      "confidence": null,
+      "confidence_kind": "uncalibrated_extraction",
+      "reason_codes": [
+        "confidence_uncalibrated"
+      ],
+      "candidates": [
+        {
+          "value": {
+            "type": "money",
+            "amount": "1200000",
+            "currency": "VND",
+            "period": "month"
+          },
+          "origins": [
+            "fixture"
+          ],
+          "methods": [
+            "synthetic_fixture"
+          ],
+          "evidence_refs": [
+            "ev_03cee5700d11b6c6f8b5cd5c763b8f07425cb28d9c86ad83058d339831d38f41"
+          ]
+        }
+      ],
+      "evidence_refs": [
+        "ev_03cee5700d11b6c6f8b5cd5c763b8f07425cb28d9c86ad83058d339831d38f41"
+      ],
+      "approval": "requires_review",
+      "correction": null
+    },
+    "tenant.birth_date": {
+      "state": "conflict",
+      "value": null,
+      "confidence": null,
+      "confidence_kind": "uncalibrated_extraction",
+      "reason_codes": [
+        "confidence_uncalibrated"
+      ],
+      "candidates": [
+        {
+          "value": {
+            "type": "date",
+            "value": "2000-02-02"
+          },
+          "origins": [
+            "fixture"
+          ],
+          "methods": [
+            "synthetic_fixture"
+          ],
+          "evidence_refs": [
+            "ev_03cee5700d11b6c6f8b5cd5c763b8f07425cb28d9c86ad83058d339831d38f41"
+          ]
+        },
+        {
+          "value": {
+            "type": "date",
+            "value": "2001-03-03"
+          },
+          "origins": [
+            "fixture"
+          ],
+          "methods": [
+            "synthetic_fixture"
+          ],
+          "evidence_refs": [
+            "ev_03cee5700d11b6c6f8b5cd5c763b8f07425cb28d9c86ad83058d339831d38f41"
+          ]
+        }
+      ],
+      "evidence_refs": [
+        "ev_03cee5700d11b6c6f8b5cd5c763b8f07425cb28d9c86ad83058d339831d38f41"
+      ],
+      "approval": "requires_review",
+      "correction": null
+    }
+  },
+  "evidence": {
+    "ev_03cee5700d11b6c6f8b5cd5c763b8f07425cb28d9c86ad83058d339831d38f41": {
+      "block_id": "fixture-block",
+      "page_number": 1,
+      "region_index": 0,
+      "source": "region_ocr",
+      "byte_start": 0,
+      "byte_end": 10,
+      "quote": "02/02/2000",
+      "bbox_2d": [
+        10,
+        10,
+        500,
+        50
+      ],
+      "geometry_scope": "source_block",
+      "detector_score": 0.8,
+      "detector_score_kind": "layout_detection",
+      "confidence": null
+    }
+  },
+  "issue_codes": [
+    "synthetic_fixture_only"
+  ]
+}

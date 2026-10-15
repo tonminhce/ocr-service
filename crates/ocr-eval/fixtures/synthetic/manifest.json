@@ -1,0 +1,190 @@
+{
+  "schema_version": "ocr-eval-manifest/1.0.0",
+  "dataset_name": "synthetic-evaluator-mechanics",
+  "synthetic": true,
+  "documents": [
+    {
+      "id": "fixture-dev",
+      "split": "dev",
+      "group_id": "fixture-group-dev",
+      "source_sha256": "2af26ddb952f8f185110012322e2774b18a37871a31cc1f2848be76eac651fce",
+      "source_path": "source-dev.txt",
+      "result_path": "business.json",
+      "result_sha256": "0b04adab7c8c28bcccce5ca232faa3f0844834bb77494812b09c6e9e58317f8d",
+      "labels": {
+        "deposit_amount": {
+          "state": "missing",
+          "values": [],
+          "evidence_gold": null
+        },
+        "landlord.birth_date": {
+          "state": "found",
+          "values": [
+            {
+              "type": "date",
+              "value": "1980-01-01"
+            }
+          ],
+          "evidence_gold": null
+        },
+        "monthly_rent": {
+          "state": "found",
+          "values": [
+            {
+              "type": "money",
+              "amount": "1000000",
+              "currency": "VND",
+              "period": "month"
+            }
+          ],
+          "evidence_gold": null
+        },
+        "tenant.birth_date": {
+          "state": "conflict",
+          "values": [
+            {
+              "type": "date",
+              "value": "2000-02-02"
+            },
+            {
+              "type": "date",
+              "value": "2001-03-03"
+            }
+          ],
+          "evidence_gold": [
+            {
+              "page_number": 1,
+              "source": "region_ocr",
+              "quote": "02/02/2000"
+            }
+          ]
+        }
+      },
+      "roles": {
+        "party-b": "tenant"
+      }
+    },
+    {
+      "id": "fixture-calibration",
+      "split": "calibration",
+      "group_id": "fixture-group-calibration",
+      "source_sha256": "946ea6c52b7c1081f646476c693f1ad2951d8ccd4b39f1e6be44af9d38d5e409",
+      "source_path": "source-calibration.txt",
+      "result_path": "business.json",
+      "result_sha256": "0b04adab7c8c28bcccce5ca232faa3f0844834bb77494812b09c6e9e58317f8d",
+      "labels": {
+        "deposit_amount": {
+          "state": "missing",
+          "values": [],
+          "evidence_gold": null
+        },
+        "landlord.birth_date": {
+          "state": "found",
+          "values": [
+            {
+              "type": "date",
+              "value": "1980-01-01"
+            }
+          ],
+          "evidence_gold": null
+        },
+        "monthly_rent": {
+          "state": "found",
+          "values": [
+            {
+              "type": "money",
+              "amount": "1000000",
+              "currency": "VND",
+              "period": "month"
+            }
+          ],
+          "evidence_gold": null
+        },
+        "tenant.birth_date": {
+          "state": "conflict",
+          "values": [
+            {
+              "type": "date",
+              "value": "2000-02-02"
+            },
+            {
+              "type": "date",
+              "value": "2001-03-03"
+            }
+          ],
+          "evidence_gold": [
+            {
+              "page_number": 1,
+              "source": "region_ocr",
+              "quote": "02/02/2000"
+            }
+          ]
+        }
+      },
+      "roles": {
+        "party-b": "tenant"
+      }
+    },
+    {
+      "id": "fixture-test",
+      "split": "test",
+      "group_id": "fixture-group-test",
+      "source_sha256": "f613a933a0ad334243c3421d1682ce88d5da218d964d16fe8ac0b633a4a0145a",
+      "source_path": "source-test.txt",
+      "result_path": "business.json",
+      "result_sha256": "0b04adab7c8c28bcccce5ca232faa3f0844834bb77494812b09c6e9e58317f8d",
+      "labels": {
+        "deposit_amount": {
+          "state": "missing",
+          "values": [],
+          "evidence_gold": null
+        },
+        "landlord.birth_date": {
+          "state": "found",
+          "values": [
+            {
+              "type": "date",
+              "value": "1980-01-01"
+            }
+          ],
+          "evidence_gold": null
+        },
+        "monthly_rent": {
+          "state": "found",
+          "values": [
+            {
+              "type": "money",
+              "amount": "1000000",
+              "currency": "VND",
+              "period": "month"
+            }
+          ],
+          "evidence_gold": null
+        },
+        "tenant.birth_date": {
+          "state": "conflict",
+          "values": [
+            {
+              "type": "date",
+              "value": "2000-02-02"
+            },
+            {
+              "type": "date",
+              "value": "2001-03-03"
+            }
+          ],
+          "evidence_gold": [
+            {
+              "page_number": 1,
+              "source": "region_ocr",
+              "quote": "02/02/2000"
+            }
+          ]
+        }
+      },
+      "roles": {
+        "party-b": "tenant"
+      }
+    }
+  ]
+}

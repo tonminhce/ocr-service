@@ -1,0 +1,925 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:ocr-service:rental-extraction:1.0.0",
+  "title": "Implemented Rust rental extraction 1.0.0",
+  "type": "object",
+  "properties": {
+    "schema_version": {
+      "const": "rental-extraction/1.0.0"
+    },
+    "profile_version": {
+      "const": "vi_rental_contract_v1"
+    },
+    "normalizer_version": {
+      "const": "vi_conservative/1.0.0"
+    },
+    "policy_version": {
+      "const": "review_all_uncalibrated/1.0.0"
+    },
+    "supported_template": {
+      "type": "boolean"
+    },
+    "decision": {
+      "const": "needs_review"
+    },
+    "source_blocks": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/source_reference"
+      }
+    },
+    "parties": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/party"
+      }
+    },
+    "fields": {
+      "type": "object",
+      "propertyNames": {
+        "type": "string",
+        "minLength": 1
+      },
+      "additionalProperties": {
+        "$ref": "#/$defs/field_result"
+      }
+    },
+    "identity_documents": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/identity_document"
+      }
+    },
+    "issues": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/issue"
+      }
+    },
+    "limitations": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    }
+  },
+  "required": [
+    "schema_version",
+    "profile_version",
+    "normalizer_version",
+    "policy_version",
+    "supported_template",
+    "decision",
+    "source_blocks",
+    "parties",
+    "fields",
+    "identity_documents",
+    "issues",
+    "limitations"
+  ],
+  "additionalProperties": false,
+  "description": "Implemented scoped Rust rental-contract extraction result, embedded under OCR result.extraction. Every output requires review; supported_template is rule coverage, not business acceptance or source accuracy. This contract describes valid source-block input and the current versioned rule profile, not arbitrary serde-deserializable instances.",
+  "$defs": {
+    "field_result": {
+      "type": "object",
+      "properties": {
+        "state": {
+          "type": "string",
+          "enum": [
+            "found",
+            "missing",
+            "unreadable",
+            "ambiguous",
+            "conflict"
+          ]
+        },
+        "selected": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/field_value"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "confidence": {
+          "type": "null",
+          "description": "Uncalibrated extraction: numeric self-ratings and detector scores must not be used as field confidence."
+        },
+        "candidates": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/candidate"
+          }
+        },
+        "observations": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/evidence"
+          }
+        }
+      },
+      "required": [
+        "state",
+        "selected",
+        "confidence",
+        "candidates",
+        "observations"
+      ],
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "state": {
+                "const": "found"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "selected": {
+                "$ref": "#/$defs/field_value"
+              },
+              "candidates": {
+                "minItems": 1,
+                "contains": {
+                  "properties": {
+                    "evidence": {
+                      "contains": {
+                        "properties": {
+                          "source": {
+                            "not": {
+                              "const": "ocr_recovery_context"
+                            }
+                          }
+                        },
+                        "required": [
+                          "source"
+                        ]
+                      }
+                    }
+                  },
+                  "required": [
+                    "evidence"
+                  ]
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "state": {
+                "const": "missing"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "selected": {
+                "type": "null"
+              },
+              "candidates": {
+                "maxItems": 0
+              },
+              "observations": {
+                "maxItems": 0
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "state": {
+                "const": "unreadable"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "selected": {
+                "type": "null"
+              },
+              "candidates": {
+                "maxItems": 0
+              },
+              "observations": {
+                "minItems": 1
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "state": {
+                "const": "conflict"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "selected": {
+                "type": "null"
+              },
+              "candidates": {
+                "minItems": 2
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "state": {
+                "const": "ambiguous"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "selected": {
+                "type": "null"
+              }
+            },
+            "anyOf": [
+              {
+                "properties": {
+                  "candidates": {
+                    "minItems": 2
+                  }
+                }
+              },
+              {
+                "properties": {
+                  "candidates": {
+                    "minItems": 1,
+                    "items": {
+                      "properties": {
+                        "evidence": {
+                          "minItems": 1,
+                          "items": {
+                            "properties": {
+                              "source": {
+                                "const": "ocr_recovery_context"
+                              }
+                            },
+                            "required": [
+                              "source"
+                            ]
+                          }
+                        }
+                      },
+                      "required": [
+                        "evidence"
+                      ]
+                    }
+                  }
+                }
+              }
+            ]
+          }
+        }
+      ],
+      "description": "States describe conservative observed-text extraction, not source truth. Found requires a selected candidate supported by at least one non-recovery evidence source. Conflict requires distinct values. Ambiguous requires distinct values or exclusively unverified recovery-context candidates (including a sole candidate); neither case selects a value. Runtime validates projected value distinction and evidence scope."
+    },
+    "field_value": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "const": "text"
+            },
+            "value": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "required": [
+            "type",
+            "value"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "const": "identifier"
+            },
+            "value": {
+              "type": "string",
+              "minLength": 1,
+              "pattern": "^\\+?[0-9]+$"
+            }
+          },
+          "required": [
+            "type",
+            "value"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "const": "date"
+            },
+            "value": {
+              "type": "string",
+              "minLength": 1,
+              "pattern": "^\\d{4}-\\d{2}-\\d{2}$",
+              "format": "date"
+            }
+          },
+          "required": [
+            "type",
+            "value"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "const": "money"
+            },
+            "amount": {
+              "type": "string",
+              "pattern": "^(0|[1-9][0-9]*)(\\.[0-9]{1,2})?$"
+            },
+            "currency": {
+              "const": "VND"
+            },
+            "period": {
+              "enum": [
+                "month",
+                null
+              ]
+            }
+          },
+          "required": [
+            "type",
+            "amount",
+            "currency",
+            "period"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "const": "area"
+            },
+            "amount": {
+              "type": "string",
+              "pattern": "^(0|[1-9][0-9]*)(\\.[0-9]{1,2})?$"
+            },
+            "unit": {
+              "const": "m2"
+            }
+          },
+          "required": [
+            "type",
+            "amount",
+            "unit"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "bbox_2d": {
+      "type": "array",
+      "prefixItems": [
+        {
+          "type": "integer",
+          "minimum": -2147483648,
+          "maximum": 2147483647
+        },
+        {
+          "type": "integer",
+          "minimum": -2147483648,
+          "maximum": 2147483647
+        },
+        {
+          "type": "integer",
+          "minimum": -2147483648,
+          "maximum": 2147483647
+        },
+        {
+          "type": "integer",
+          "minimum": -2147483648,
+          "maximum": 2147483647
+        }
+      ],
+      "items": false,
+      "minItems": 4,
+      "maxItems": 4,
+      "description": "Coordinates of the complete source block, [x1,y1,x2,y2], in its source coordinate system. No word/field box is asserted. Runtime must validate ordering and the source coordinate convention."
+    },
+    "source_reference": {
+      "type": "object",
+      "properties": {
+        "block_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "page_number": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 4294967295
+        },
+        "region_index": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 4294967295
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "source": {
+          "type": "string",
+          "minLength": 1
+        },
+        "text_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "text_bytes": {
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "block_id",
+        "page_number",
+        "region_index",
+        "source",
+        "text_sha256",
+        "text_bytes"
+      ],
+      "additionalProperties": false
+    },
+    "evidence": {
+      "type": "object",
+      "properties": {
+        "block_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "page_number": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 4294967295
+        },
+        "region_index": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 4294967295
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "source": {
+          "type": "string",
+          "minLength": 1
+        },
+        "byte_start": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "byte_end": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "quote": {
+          "type": "string",
+          "minLength": 1
+        },
+        "bbox_2d": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/bbox_2d"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "geometry_scope": {
+          "const": "source_block"
+        },
+        "detector_score": {
+          "anyOf": [
+            {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "detector_score_kind": {
+          "const": "layout_detection_not_ocr_confidence"
+        },
+        "confidence": {
+          "type": "null",
+          "description": "Uncalibrated extraction: numeric self-ratings and detector scores must not be used as field confidence."
+        }
+      },
+      "required": [
+        "block_id",
+        "page_number",
+        "region_index",
+        "source",
+        "byte_start",
+        "byte_end",
+        "quote",
+        "bbox_2d",
+        "geometry_scope",
+        "detector_score",
+        "detector_score_kind",
+        "confidence"
+      ],
+      "additionalProperties": false,
+      "description": "Exact quote from the original UTF-8 source block; offsets are zero-based byte offsets, end-exclusive. Explicitly anchored empty values retain a nonempty anchor-line quote. Schema does not validate hashes, references, UTF-8 boundaries, quote equality, or span ordering; Rust verifies these against immutable SourceBlock text. Geometry is whole-block only."
+    },
+    "candidate": {
+      "type": "object",
+      "properties": {
+        "value": {
+          "$ref": "#/$defs/field_value"
+        },
+        "raw_value": {
+          "type": "string",
+          "minLength": 1
+        },
+        "origin": {
+          "enum": [
+            "contract",
+            "identity_card"
+          ]
+        },
+        "method": {
+          "enum": [
+            "explicit_anchor_rule",
+            "restricted_idvnm_mrz_rule"
+          ]
+        },
+        "confidence": {
+          "type": "null",
+          "description": "Uncalibrated extraction: numeric self-ratings and detector scores must not be used as field confidence."
+        },
+        "evidence": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/evidence"
+          },
+          "minItems": 1
+        }
+      },
+      "required": [
+        "value",
+        "raw_value",
+        "origin",
+        "method",
+        "confidence",
+        "evidence"
+      ],
+      "additionalProperties": false,
+      "description": "Candidate provenance distinguishes explicit anchors from the narrowly supported, check-digit-tested identity-card MRZ identifier path. The restricted MRZ rule does not validate an entire MRZ or establish document authenticity."
+    },
+    "party": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "designator": {
+          "type": "string",
+          "minLength": 1
+        },
+        "role": {
+          "enum": [
+            "landlord",
+            "tenant",
+            "unknown"
+          ]
+        },
+        "role_evidence": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/evidence"
+          },
+          "minItems": 1
+        },
+        "contract_fields": {
+          "type": "object",
+          "propertyNames": {
+            "type": "string",
+            "minLength": 1
+          },
+          "additionalProperties": {
+            "$ref": "#/$defs/field_result"
+          }
+        },
+        "identity_fields": {
+          "type": "object",
+          "propertyNames": {
+            "type": "string",
+            "minLength": 1
+          },
+          "additionalProperties": {
+            "$ref": "#/$defs/field_result"
+          }
+        },
+        "fields": {
+          "type": "object",
+          "propertyNames": {
+            "type": "string",
+            "minLength": 1
+          },
+          "additionalProperties": {
+            "$ref": "#/$defs/field_result"
+          }
+        },
+        "linked_identity_documents": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "uniqueItems": true
+        }
+      },
+      "required": [
+        "id",
+        "designator",
+        "role",
+        "role_evidence",
+        "contract_fields",
+        "identity_fields",
+        "fields",
+        "linked_identity_documents"
+      ],
+      "additionalProperties": false,
+      "description": "Contract, identity-card, and combined observations stay separate. Role comes from explicit role headings, not an unconditional A/B assumption. A combined conflict must retain candidates and have no selected value."
+    },
+    "identity_document": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "source_block_ids": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "minItems": 1,
+          "uniqueItems": true
+        },
+        "side": {
+          "enum": [
+            "front",
+            "back"
+          ]
+        },
+        "fields": {
+          "type": "object",
+          "propertyNames": {
+            "type": "string",
+            "minLength": 1
+          },
+          "additionalProperties": {
+            "$ref": "#/$defs/field_result"
+          }
+        },
+        "linkage": {
+          "type": "object",
+          "properties": {
+            "state": {
+              "enum": [
+                "unmatched",
+                "linked",
+                "ambiguous"
+              ]
+            },
+            "party_ids": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1
+              },
+              "uniqueItems": true
+            },
+            "method": {
+              "const": "exact_unambiguous_identifier_only"
+            },
+            "evidence": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/evidence"
+              }
+            }
+          },
+          "required": [
+            "state",
+            "party_ids",
+            "method",
+            "evidence"
+          ],
+          "additionalProperties": false,
+          "allOf": [
+            {
+              "if": {
+                "properties": {
+                  "state": {
+                    "const": "linked"
+                  }
+                }
+              },
+              "then": {
+                "properties": {
+                  "party_ids": {
+                    "minItems": 1,
+                    "maxItems": 1
+                  },
+                  "evidence": {
+                    "minItems": 1
+                  }
+                }
+              }
+            },
+            {
+              "if": {
+                "properties": {
+                  "state": {
+                    "const": "unmatched"
+                  }
+                }
+              },
+              "then": {
+                "properties": {
+                  "party_ids": {
+                    "maxItems": 0
+                  }
+                }
+              }
+            },
+            {
+              "if": {
+                "properties": {
+                  "state": {
+                    "const": "ambiguous"
+                  }
+                }
+              },
+              "then": {
+                "properties": {
+                  "party_ids": {
+                    "oneOf": [
+                      {
+                        "maxItems": 0
+                      },
+                      {
+                        "minItems": 2
+                      }
+                    ]
+                  }
+                }
+              }
+            }
+          ],
+          "description": "Front/back observations remain separate records. A link is an OCR identifier match, not authentication. Ambiguous may have no proposed party when its own identifier is ambiguous, or multiple proposed parties."
+        }
+      },
+      "required": [
+        "id",
+        "source_block_ids",
+        "side",
+        "fields",
+        "linkage"
+      ],
+      "additionalProperties": false
+    },
+    "issue": {
+      "type": "object",
+      "properties": {
+        "code": {
+          "type": "string",
+          "minLength": 1
+        },
+        "severity": {
+          "const": "review"
+        },
+        "field_path": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "message": {
+          "type": "string",
+          "minLength": 1
+        },
+        "suggested_correction": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "evidence": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/evidence"
+          }
+        }
+      },
+      "required": [
+        "code",
+        "severity",
+        "field_path",
+        "message",
+        "suggested_correction",
+        "evidence"
+      ],
+      "additionalProperties": false,
+      "description": "Suggested corrections are review suggestions only and must not replace original OCR or evidence."
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "issues": {
+            "contains": {
+              "type": "object",
+              "properties": {
+                "code": {
+                  "const": "extraction_budget_exceeded"
+                }
+              },
+              "required": [
+                "code"
+              ]
+            }
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "supported_template": {
+            "const": false
+          },
+          "source_blocks": {
+            "maxItems": 0
+          },
+          "parties": {
+            "maxItems": 0
+          },
+          "fields": {
+            "maxProperties": 0
+          },
+          "identity_documents": {
+            "maxItems": 0
+          },
+          "issues": {
+            "minItems": 1,
+            "maxItems": 1
+          }
+        }
+      }
+    }
+  ]
+}

@@ -1,0 +1,24 @@
+# Local protocol demo: the fixture server returns canned text, without OCR.
+# docker compose -f compose.yaml -f compose.demo.yaml up --build -d
+services:
+  worker:
+    volumes: !reset []
+    environment:
+      OCR_STRATEGY: full_page_vlm
+      VLLM_BASE_URL: http://mock-vllm:8000/v1
+      VLLM_MODEL: mock-ocr
+    depends_on:
+      mock-vllm:
+        condition: service_started
+
+  mock-vllm:
+    image: ocr-service:local
+    build: .
+    command: ["mock-vllm"]
+    environment:
+      MOCK_BIND_ADDR: 0.0.0.0:8000
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
