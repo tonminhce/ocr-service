@@ -8,34 +8,40 @@ use uuid::Uuid;
 
 struct Fixture {
     cluster: PgConnection,
+    cluster_options: PgConnectOptions,
     options: PgConnectOptions,
     name: String,
+    finished: bool,
 }
 
 impl Fixture {
     async fn new() -> Self {
         let url = std::env::var("TEST_ADMIN_DATABASE_URL")
             .expect("TEST_ADMIN_DATABASE_URL required; never use a live DB");
-        let mut cluster = PgConnection::connect(&url).await.unwrap();
+        let cluster_options = PgConnectOptions::from_str(&url).unwrap();
+        let mut cluster = PgConnection::connect_with(&cluster_options).await.unwrap();
         let name = format!("ocr_restore_{}", Uuid::new_v4().simple());
         sqlx::query(&format!("CREATE DATABASE {name}"))
             .execute(&mut cluster)
             .await
             .unwrap();
         println!("TRACE restore-target disposable fixture created: {name}");
-        let options = PgConnectOptions::from_str(&url).unwrap().database(&name);
+        let options = cluster_options.clone().database(&name);
         let mut admin = PgConnection::connect_with(&options).await.unwrap();
         let passwords =
             std::array::from_fn(|i| format!("isolated-role-{i}-quote'back\\slash-safe"));
         administration::bootstrap(&mut admin, &passwords)
             .await
             .unwrap();
-        admin.close().await.unwrap();
-        Self {
+        let fixture = Self {
             cluster,
+            cluster_options,
             options,
             name,
-        }
+            finished: false,
+        };
+        fixture.close(admin).await;
+        fixture
     }
 
     async fn admin(&self) -> PgConnection {
@@ -57,16 +63,51 @@ impl Fixture {
     async fn change(&self, sql: &str) {
         let mut admin = self.admin().await;
         sqlx::raw_sql(sql).execute(&mut admin).await.unwrap();
-        admin.close().await.unwrap();
+        self.close(admin).await;
     }
 
     async fn attempt(&self, expected: &str) -> Result<(), AdminError> {
         let mut migrator = self.login("ocr_migrator", 0).await;
+        let pid = backend_pid(&mut migrator).await;
         let result = administration::prepare_restore_target(&mut migrator, expected).await;
         // Failure can follow acquisition of a session advisory lock. Always
         // close; returning this connection to a pool would retain that lock.
         migrator.close().await.unwrap();
+        self.wait_exit(pid).await;
         result
+    }
+
+    async fn close(&self, mut connection: PgConnection) {
+        let pid = backend_pid(&mut connection).await;
+        connection.close().await.unwrap();
+        self.wait_exit(pid).await;
+    }
+
+    /// Client close sends Terminate without awaiting backend exit, while the
+    /// restore preflight correctly refuses any other backend. Wait for the
+    /// server to retire the closed session before the next attempt.
+    async fn wait_exit(&self, pid: i32) {
+        let mut observer = PgConnection::connect_with(&self.cluster_options)
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let alive: bool = sqlx::query_scalar(
+                    "SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE pid = $1)",
+                )
+                .bind(pid)
+                .fetch_one(&mut observer)
+                .await
+                .unwrap();
+                if !alive {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("closed fixture session must exit");
+        observer.close().await.unwrap();
     }
 
     async fn reject_change(&self, label: &str, create: &str, repair: &str) {
@@ -88,12 +129,42 @@ impl Fixture {
     }
 
     async fn finish(mut self) {
-        sqlx::query(&format!("DROP DATABASE {}", self.name))
+        sqlx::query(&format!("DROP DATABASE {} WITH (FORCE)", self.name))
             .execute(&mut self.cluster)
             .await
             .unwrap();
-        self.cluster.close().await.unwrap();
+        self.finished = true;
     }
+}
+
+impl Drop for Fixture {
+    /// A failed assertion must not leave a uniquely named database behind.
+    fn drop(&mut self) {
+        if self.finished {
+            return;
+        }
+        let options = self.cluster_options.clone();
+        let statement = format!("DROP DATABASE IF EXISTS {} WITH (FORCE)", self.name);
+        let _ = std::thread::spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            runtime.block_on(async {
+                let mut cluster = PgConnection::connect_with(&options).await.ok()?;
+                sqlx::query(&statement).execute(&mut cluster).await.ok()?;
+                cluster.close().await.ok()
+            })
+        })
+        .join();
+    }
+}
+
+async fn backend_pid(connection: &mut PgConnection) -> i32 {
+    sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(connection)
+        .await
+        .unwrap()
 }
 
 #[tokio::test]
@@ -185,7 +256,7 @@ async fn rejects_identity_inventory_acl_ownership_and_role_drift() {
         administration::prepare_restore_target(&mut api, &fixture.name).await,
         Err(AdminError::MigratorRequired)
     ));
-    api.close().await.unwrap();
+    fixture.close(api).await;
     let mut admin = fixture.admin().await;
     sqlx::query("SET ROLE ocr_owner")
         .execute(&mut admin)
@@ -195,7 +266,7 @@ async fn rejects_identity_inventory_acl_ownership_and_role_drift() {
         administration::prepare_restore_target(&mut admin, &fixture.name).await,
         Err(AdminError::MigratorRequired)
     ));
-    admin.close().await.unwrap();
+    fixture.close(admin).await;
     println!(
         "TRACE restore-target identity: empty/non-ASCII/invalid/overlong/mismatched database names and wrong actual logins rejected, including admin SET ROLE owner"
     );
@@ -351,7 +422,7 @@ async fn rejects_identity_inventory_acl_ownership_and_role_drift() {
     administration::bootstrap(&mut repaired, &passwords)
         .await
         .unwrap();
-    repaired.close().await.unwrap();
+    fixture.close(repaired).await;
     fixture.attempt(&fixture.name).await.unwrap();
     println!(
         "TRACE restore-target all synthetic inventory/ACL/ownership/role/GUC drift refused; explicit bootstrap repair restores acceptance"
@@ -376,7 +447,7 @@ async fn rejects_another_backend_and_a_competing_session_lock() {
         fixture.attempt(&fixture.name).await,
         Err(AdminError::RestoreBusy)
     ));
-    other.close().await.unwrap();
+    fixture.close(other).await;
     fixture.attempt(&fixture.name).await.unwrap();
     println!(
         "TRACE restore-target competing backend and advisory lock each refused; closing connections releases exclusion and empty target accepts"
