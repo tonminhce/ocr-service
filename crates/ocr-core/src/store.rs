@@ -6,7 +6,7 @@ use thiserror::Error;
 use uuid::Uuid;
 
 use crate::domain::{Job, LeasedJob, NewJob, OutboxDelivery, SubmitOutcome};
-use crate::metrics::OperationalSnapshot;
+use crate::metrics::{OperationalSnapshot, PoolSnapshot};
 
 const JOB_COLUMNS: &str = "id, filename, media_type, sha256, extraction_profile, status, attempts, \
     created_at, updated_at, result, error";
@@ -150,6 +150,14 @@ impl Store {
     /// Allows callers to configure pool limits or an isolated test schema.
     pub fn from_pool(pool: PgPool) -> Self {
         Self { pool }
+    }
+
+    pub fn pool_snapshot(&self) -> PoolSnapshot {
+        PoolSnapshot {
+            size: self.pool.size(),
+            idle: self.pool.num_idle().min(u32::MAX as usize) as u32,
+            max: self.pool.options().get_max_connections(),
+        }
     }
 
     pub async fn migrate(&self) -> Result<(), StoreError> {

@@ -80,6 +80,30 @@ pub struct OperationalSnapshot {
     pub database_bytes: u64,
     pub redis_pending_entries: u64,
     pub redis_memory_bytes: u64,
+    pub redis_maxmemory_bytes: u64,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct PoolSnapshot {
+    pub size: u32,
+    pub idle: u32,
+    pub max: u32,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct DependencySnapshot {
+    pub up: bool,
+    pub checked_at_seconds: u64,
+    pub elapsed: Duration,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct RuntimeSnapshot {
+    pub sampled_at_seconds: u64,
+    pub database_pool: PoolSnapshot,
+    pub parser: DependencySnapshot,
+    pub model_catalog: DependencySnapshot,
+    pub parser_sessions: Option<(u32, u32)>,
 }
 dimension!(HttpRoute {
     Submit => "submit", Job => "job", Status => "status", Business => "business",
@@ -193,6 +217,7 @@ pub struct Metrics {
     model_tokens: [AtomicU64; TokenKind::COUNT],
     model_token_observations: [AtomicU64; TokenKind::COUNT],
     operational: Mutex<OperationalMetrics>,
+    runtime: Mutex<Option<RuntimeSnapshot>>,
 }
 
 #[derive(Default)]
@@ -222,6 +247,7 @@ impl Metrics {
             model_tokens: std::array::from_fn(|_| AtomicU64::new(0)),
             model_token_observations: std::array::from_fn(|_| AtomicU64::new(0)),
             operational: Mutex::new(OperationalMetrics::default()),
+            runtime: Mutex::new(None),
         }
     }
     pub fn observe(&self, stage: Stage, elapsed: Duration) {
@@ -298,6 +324,12 @@ impl Metrics {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .collector_error = true;
+    }
+    pub fn runtime_snapshot(&self, snapshot: RuntimeSnapshot) {
+        *self
+            .runtime
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(snapshot);
     }
     /// No database, network or model calls. All series exist even before first use.
     pub fn render(&self) -> String {
@@ -476,6 +508,12 @@ impl Metrics {
                 "ocr_operational_redis_memory_bytes {}",
                 snapshot.redis_memory_bytes
             );
+            output.push_str("# HELP ocr_operational_redis_maxmemory_bytes Redis configured maxmemory from INFO; zero means no Redis memory limit.\n# TYPE ocr_operational_redis_maxmemory_bytes gauge\n");
+            let _ = writeln!(
+                output,
+                "ocr_operational_redis_maxmemory_bytes {}",
+                snapshot.redis_maxmemory_bytes
+            );
             output.push_str("# HELP ocr_operational_collector_last_success_timestamp_seconds Unix time of the last complete background snapshot.\n# TYPE ocr_operational_collector_last_success_timestamp_seconds gauge\n");
             let _ = writeln!(
                 output,
@@ -488,6 +526,58 @@ impl Metrics {
                 "ocr_operational_collector_error {}",
                 u8::from(operational.collector_error)
             );
+        }
+        drop(operational);
+        let runtime = *self
+            .runtime
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(snapshot) = runtime {
+            output.push_str("# HELP ocr_runtime_last_sample_timestamp_seconds Unix time when process-local runtime observations were sampled; zero before first observation.\n# TYPE ocr_runtime_last_sample_timestamp_seconds gauge\n");
+            let _ = writeln!(
+                output,
+                "ocr_runtime_last_sample_timestamp_seconds {}",
+                snapshot.sampled_at_seconds
+            );
+            output.push_str("# HELP ocr_database_pool_connections Process-local SQLx pool occupancy from a background snapshot; does not measure waiters.\n# TYPE ocr_database_pool_connections gauge\n");
+            for (state, value) in [
+                ("size", snapshot.database_pool.size),
+                ("idle", snapshot.database_pool.idle),
+                ("max", snapshot.database_pool.max),
+            ] {
+                let _ = writeln!(
+                    output,
+                    "ocr_database_pool_connections{{state=\"{state}\"}} {value}"
+                );
+            }
+            output.push_str("# HELP ocr_dependency_up Whether the last bounded dependency probe succeeded; model_catalog is not inference readiness.\n# TYPE ocr_dependency_up gauge\n");
+            output.push_str("# HELP ocr_dependency_last_check_timestamp_seconds Unix time when the last probe ended, including failed probes; zero before first observation.\n# TYPE ocr_dependency_last_check_timestamp_seconds gauge\n");
+            output.push_str("# HELP ocr_dependency_probe_duration_seconds Wall time of the last completed dependency probe.\n# TYPE ocr_dependency_probe_duration_seconds gauge\n");
+            for (dependency, observation) in [
+                ("parser", snapshot.parser),
+                ("model_catalog", snapshot.model_catalog),
+            ] {
+                let _ = writeln!(
+                    output,
+                    "ocr_dependency_up{{dependency=\"{dependency}\"}} {}",
+                    u8::from(observation.up)
+                );
+                let _ = writeln!(
+                    output,
+                    "ocr_dependency_last_check_timestamp_seconds{{dependency=\"{dependency}\"}} {}",
+                    observation.checked_at_seconds
+                );
+                let _ = writeln!(
+                    output,
+                    "ocr_dependency_probe_duration_seconds{{dependency=\"{dependency}\"}} {}",
+                    observation.elapsed.as_secs_f64()
+                );
+            }
+            if let Some((active, max)) = snapshot.parser_sessions {
+                output.push_str("# HELP ocr_parser_sessions Shared parser capacity from its most recent successful health response; aggregate replicas with max, not sum.\n# TYPE ocr_parser_sessions gauge\n");
+                let _ = writeln!(output, "ocr_parser_sessions{{state=\"active\"}} {active}");
+                let _ = writeln!(output, "ocr_parser_sessions{{state=\"max\"}} {max}");
+            }
         }
         output
     }
@@ -688,6 +778,45 @@ mod tests {
         assert!(output.contains("ocr_model_usage_total{state=\"invalid\"} 1\n"));
     }
     #[test]
+    fn runtime_health_is_opt_in_fixed_cardinality_and_drops_invalidated_capacity() {
+        let metrics = Metrics::new();
+        assert!(!metrics.render().contains("ocr_dependency_up"));
+        metrics.runtime_snapshot(RuntimeSnapshot {
+            sampled_at_seconds: 101,
+            database_pool: PoolSnapshot {
+                size: 4,
+                idle: 1,
+                max: 10,
+            },
+            parser: DependencySnapshot {
+                up: true,
+                checked_at_seconds: 100,
+                elapsed: Duration::from_millis(20),
+            },
+            model_catalog: DependencySnapshot {
+                up: false,
+                checked_at_seconds: 101,
+                elapsed: Duration::from_secs(2),
+            },
+            parser_sessions: Some((2, 8)),
+        });
+        let healthy = metrics.render();
+        assert!(healthy.contains("ocr_runtime_last_sample_timestamp_seconds 101\n"));
+        assert!(healthy.contains("ocr_dependency_up{dependency=\"parser\"} 1\n"));
+        assert!(healthy.contains("ocr_dependency_up{dependency=\"model_catalog\"} 0\n"));
+        assert!(healthy.contains(
+            "ocr_dependency_last_check_timestamp_seconds{dependency=\"model_catalog\"} 101\n"
+        ));
+        assert!(healthy.contains("ocr_database_pool_connections{state=\"max\"} 10\n"));
+        assert!(healthy.contains("ocr_parser_sessions{state=\"active\"} 2\n"));
+        metrics.runtime_snapshot(RuntimeSnapshot::default());
+        let unavailable = metrics.render();
+        assert!(!unavailable.contains("ocr_parser_sessions{"));
+        assert!(!unavailable.contains("job_id"));
+        assert!(!unavailable.contains("model_name"));
+    }
+
+    #[test]
     fn operational_metrics_are_cached_fixed_cardinality_and_retain_last_good_snapshot() {
         let metrics = Metrics::new();
         assert!(!metrics.render().contains("ocr_operational_jobs"));
@@ -707,6 +836,7 @@ mod tests {
             database_bytes: 8192,
             redis_pending_entries: 6,
             redis_memory_bytes: 4096,
+            redis_maxmemory_bytes: 8192,
         });
         metrics.operational_collector_failed();
         let output = metrics.render();
@@ -717,6 +847,7 @@ mod tests {
         assert!(output.contains("ocr_operational_database_bytes 8192\n"));
         assert!(output.contains("ocr_operational_redis_pending_entries 6\n"));
         assert!(output.contains("ocr_operational_redis_memory_bytes 4096\n"));
+        assert!(output.contains("ocr_operational_redis_maxmemory_bytes 8192\n"));
         assert!(output.contains("ocr_operational_collector_error 1\n"));
         assert!(output.contains("ocr_operational_collector_last_success_timestamp_seconds "));
         assert!(!output.contains("job_id"));

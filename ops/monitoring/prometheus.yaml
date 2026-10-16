@@ -1,0 +1,38 @@
+global:
+  scrape_interval: 15s
+  scrape_timeout: 5s
+  evaluation_interval: 15s
+
+rule_files:
+  - /etc/ocr-monitoring/alerts.yaml
+
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets: [alertmanager:9093]
+
+scrape_configs:
+  - job_name: prometheus
+    sample_limit: 10000
+    static_configs:
+      - targets: [localhost:9090]
+  - job_name: alertmanager
+    sample_limit: 5000
+    static_configs:
+      - targets: [alertmanager:9093]
+  - job_name: ocr-api
+    sample_limit: 5000
+    body_size_limit: 1MB
+    static_configs:
+      - targets: [api:9091]
+    authorization:
+      type: Bearer
+      credentials_file: /run/secrets/metrics_token
+  - job_name: ocr-worker
+    sample_limit: 5000
+    body_size_limit: 1MB
+    static_configs:
+      - targets: [worker:9092]
+    authorization:
+      type: Bearer
+      credentials_file: /run/secrets/metrics_token

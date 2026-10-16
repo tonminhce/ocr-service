@@ -79,6 +79,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: docker/setup-buildx-action@v3
+      - name: Validate monitoring config and alert semantics
+        run: bash scripts/check-monitoring.sh
       - name: Linux parser verification target
         uses: docker/build-push-action@v6
         with:
@@ -138,8 +140,9 @@ jobs:
         # Fails on fixable CRITICAL findings; HIGH findings are reported for review.
         run: |
           mkdir -p release
-          for image in "ocr-service:${{ github.sha }}" "ocr-service:parser-${{ github.sha }}" "ocr-service:backup-${{ github.sha }}"; do
-            name=${image#ocr-service:}
+          monitoring_images=$(docker compose --env-file /dev/null -f compose.production.yaml -f compose.monitoring.yaml --profile monitoring config --images | grep '^prom/')
+          for image in "ocr-service:${{ github.sha }}" "ocr-service:parser-${{ github.sha }}" "ocr-service:backup-${{ github.sha }}" $monitoring_images; do
+            name=${image//[\/:@]/-}
             trivy image --quiet --format cyclonedx --output "release/sbom-$name.cdx.json" "$image"
             trivy image --quiet --severity HIGH,CRITICAL --format table "$image" | tee "release/vulnerabilities-$name.txt"
             trivy image --quiet --exit-code 1 --ignore-unfixed --severity CRITICAL "$image"
@@ -151,13 +154,15 @@ jobs:
             --app-image "ocr-service:${{ github.sha }}" \
             --parser-image "ocr-service:parser-${{ github.sha }}" \
             --backup-image "ocr-service:backup-${{ github.sha }}" \
+            --monitoring \
             --output release/inventory
-      - name: Packaged smoke (fixture model, slow responses, parser faults)
+      - name: Packaged pipeline and monitoring fault drill
+        timeout-minutes: 20
         env:
           PROD_IMAGE: ocr-service:${{ github.sha }}
           PROD_PARSER_IMAGE: ocr-service:parser-${{ github.sha }}
           SMOKE_OUTPUT_DIR: ${{ runner.temp }}/smoke
-        run: scripts/production-smoke.sh
+        run: python3 scripts/monitoring-smoke.py --app-image "$PROD_IMAGE" --parser-image "$PROD_PARSER_IMAGE" --output "$SMOKE_OUTPUT_DIR"
       - uses: actions/upload-artifact@v4
         if: always()
         with:

@@ -1,0 +1,135 @@
+groups:
+- name: ocr-production-candidate-v1
+  rules:
+  - record: ocr:operational_fresh
+    expr: (time() - ocr_operational_collector_last_success_timestamp_seconds{job="ocr-worker"} <= 90) and (ocr_operational_collector_last_success_timestamp_seconds{job="ocr-worker"}
+      > 0) and (ocr_operational_collector_last_success_timestamp_seconds{job="ocr-worker"} <= time() + 5) and on (job, instance) (up{job="ocr-worker"} == 1)
+  - record: ocr:runtime_fresh
+    expr: (time() - ocr_runtime_last_sample_timestamp_seconds{job="ocr-worker"} <= 90) and (ocr_runtime_last_sample_timestamp_seconds{job="ocr-worker"} > 0) and (ocr_runtime_last_sample_timestamp_seconds{job="ocr-worker"}
+      <= time() + 5) and on (job, instance) (up{job="ocr-worker"} == 1)
+  - record: ocr:dependency_fresh
+    expr: (time() - ocr_dependency_last_check_timestamp_seconds{job="ocr-worker"} <= 90) and (ocr_dependency_last_check_timestamp_seconds{job="ocr-worker"} > 0) and (ocr_dependency_last_check_timestamp_seconds{job="ocr-worker"}
+      <= time() + 5) and on (job, instance) (up{job="ocr-worker"} == 1)
+  - alert: OCRTargetDown
+    expr: up{job=~"ocr-api|ocr-worker|prometheus|alertmanager"} == 0
+    for: 1m
+    labels:
+      severity: critical
+      policy: candidate-v1
+    annotations:
+      summary: OCR or monitoring metrics target is unavailable
+      runbook: docs/alert-runbook.md#ocrtargetdown
+  - alert: OCRObserverMetricsMissing
+    expr: ((up{job="ocr-worker"} == 1) unless on (job, instance) ocr_operational_collector_last_success_timestamp_seconds{job="ocr-worker"}) or ((up{job="ocr-worker"} == 1) unless on
+      (job, instance) ocr_runtime_last_sample_timestamp_seconds{job="ocr-worker"})
+    for: 1m
+    labels:
+      severity: warning
+      policy: candidate-v1
+    annotations:
+      summary: Worker observer timestamp metrics are missing
+      runbook: docs/alert-runbook.md#ocrobservermetricsmissing
+  - alert: OCRDependencyMetricsMissing
+    expr: (label_replace(up{job="ocr-worker"} == 1, "dependency", "parser", "job", ".*") or label_replace(up{job="ocr-worker"} == 1, "dependency", "model_catalog", "job", ".*")) unless
+      on (job, instance, dependency) (ocr_dependency_up{job="ocr-worker"} and on (job, instance, dependency) ocr_dependency_last_check_timestamp_seconds{job="ocr-worker"})
+    for: 1m
+    labels:
+      severity: warning
+      policy: candidate-v1
+    annotations:
+      summary: Expected parser or model-catalog probe metrics are missing
+      runbook: docs/alert-runbook.md#ocrdependencymetricsmissing
+  - alert: OCRCollectorStale
+    expr: ((time() - ocr_operational_collector_last_success_timestamp_seconds{job="ocr-worker"} > 90) or (ocr_operational_collector_last_success_timestamp_seconds{job="ocr-worker"} >
+      time() + 5)) and on (job, instance) (up{job="ocr-worker"} == 1)
+    for: 1m
+    labels:
+      severity: warning
+      policy: candidate-v1
+    annotations:
+      summary: Durable queue observation timestamps are stale or invalid
+      runbook: docs/alert-runbook.md#ocrcollectorstale
+  - alert: OCRCollectorFailed
+    expr: (ocr_operational_collector_error{job="ocr-worker"} == 1) and on (job, instance) (up{job="ocr-worker"} == 1)
+    for: 1m
+    labels:
+      severity: warning
+      policy: candidate-v1
+    annotations:
+      summary: PostgreSQL or Redis background observation failed
+      runbook: docs/alert-runbook.md#ocrcollectorfailed
+  - alert: OCRDependencyUnavailable
+    expr: (ocr_dependency_up{job="ocr-worker"} == 0) and on (job, instance, dependency) ocr:dependency_fresh
+    for: 1m
+    labels:
+      severity: warning
+      policy: candidate-v1
+    annotations:
+      summary: Bounded parser or model-catalog probe failed
+      runbook: docs/alert-runbook.md#ocrdependencyunavailable
+  - alert: OCRDependencyProbeStale
+    expr: ((time() - ocr_dependency_last_check_timestamp_seconds{job="ocr-worker"} > 90) or (ocr_dependency_last_check_timestamp_seconds{job="ocr-worker"} > time() + 5)) and on (job,
+      instance) (up{job="ocr-worker"} == 1)
+    for: 1m
+    labels:
+      severity: warning
+      policy: candidate-v1
+    annotations:
+      summary: Dependency observation timestamps are stale or invalid
+      runbook: docs/alert-runbook.md#ocrdependencyprobestale
+  - alert: OCRBacklogAge
+    expr: max by (job) (ocr_operational_oldest_eligible_seconds{job="ocr-worker"} and on (job, instance) ocr:operational_fresh) > 300
+    for: 2m
+    labels:
+      severity: warning
+      policy: candidate-v1
+    annotations:
+      summary: Eligible OCR jobs have waited over five minutes
+      runbook: docs/alert-runbook.md#ocrbacklogage
+  - alert: OCROutboxDelayed
+    expr: max by (job) (ocr_operational_oldest_due_outbox_seconds{job="ocr-worker"} and on (job, instance) ocr:operational_fresh) > 60
+    for: 1m
+    labels:
+      severity: warning
+      policy: candidate-v1
+    annotations:
+      summary: Durable dispatch notifications are delayed
+      runbook: docs/alert-runbook.md#ocroutboxdelayed
+  - alert: OCRExpiredLeases
+    expr: max by (job) (ocr_operational_expired_leases{job="ocr-worker"} and on (job, instance) ocr:operational_fresh) > 0
+    for: 1m
+    labels:
+      severity: warning
+      policy: candidate-v1
+    annotations:
+      summary: Worker leases remain expired in a fresh snapshot
+      runbook: docs/alert-runbook.md#ocrexpiredleases
+  - alert: OCRJobFailures
+    expr: sum by (job) (increase(ocr_job_attempts_total{job="ocr-worker",outcome="failed"}[5m])) >= 3
+    for: 1m
+    labels:
+      severity: warning
+      policy: candidate-v1
+    annotations:
+      summary: Observed terminal OCR attempt failures increased by at least three in five minutes
+      runbook: docs/alert-runbook.md#ocrjobfailures
+  - alert: OCRPoolSaturation
+    expr: (((ocr_database_pool_connections{job="ocr-worker",state="size"} - ignoring (state) ocr_database_pool_connections{job="ocr-worker",state="idle"}) / ignoring (state) clamp_min(ocr_database_pool_connections{job="ocr-worker",state="max"},
+      1)) >= 0.9) and on (job, instance) ocr:runtime_fresh
+    for: 2m
+    labels:
+      severity: warning
+      policy: candidate-v1
+    annotations:
+      summary: Worker database connections are mostly busy
+      runbook: docs/alert-runbook.md#ocrpoolsaturation
+  - alert: OCRRedisMemoryHigh
+    expr: max by (job) ((ocr_operational_redis_memory_bytes{job="ocr-worker"} and on (job, instance) ocr:operational_fresh) / on (job, instance) (ocr_operational_redis_maxmemory_bytes{job="ocr-worker"}
+      > 0)) > 0.85
+    for: 2m
+    labels:
+      severity: warning
+      policy: candidate-v1
+    annotations:
+      summary: Redis used memory exceeds 85 percent of its configured maxmemory
+      runbook: docs/alert-runbook.md#ocrredismemoryhigh

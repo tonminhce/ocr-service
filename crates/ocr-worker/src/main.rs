@@ -41,8 +41,9 @@ async fn main() -> anyhow::Result<()> {
     let observer = ocr_worker::observer::spawn(
         store.clone(),
         RedisQueue::new(&settings).map_err(|_| anyhow::anyhow!("Redis observer setup failed"))?,
+        &settings,
         shutdown.clone(),
-    );
+    )?;
     let metrics_task = endpoint.map(|endpoint| {
         let stop = shutdown.clone();
         tracing::info!(address = %endpoint.local_addr().expect("bound metrics socket"), "worker metrics listening");

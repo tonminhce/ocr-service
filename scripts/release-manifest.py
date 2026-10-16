@@ -58,6 +58,7 @@ def main():
     parser.add_argument("--output", type=pathlib.Path, required=True)
     parser.add_argument("--layout-model", type=pathlib.Path)
     parser.add_argument("--model-sha256")
+    parser.add_argument("--monitoring", action="store_true")
     args = parser.parse_args()
     if args.model_sha256 and not re.fullmatch(r"[0-9a-f]{64}", args.model_sha256):
         parser.error("--model-sha256 requires lowercase SHA-256")
@@ -68,11 +69,19 @@ def main():
             "redis": "redis:8.2-alpine@sha256:b51665e66f00759be7c3152ad5ac3c66fb2f619c13ef62dea7cc1f9914524635",
         }.items()
     }
+    if args.monitoring:
+        references = command(["docker", "compose", "--env-file", "/dev/null", "-f", "compose.production.yaml",
+                              "-f", "compose.monitoring.yaml", "--profile", "monitoring", "config", "--images"]).splitlines()
+        for name in ["prometheus", "alertmanager"]:
+            reference = next((reference for reference in references if reference.startswith(f"prom/{name}:")), None)
+            if reference is None or "@sha256:" not in reference:
+                raise ValueError("monitoring release requires the pinned Compose images")
+            images[name] = inspect_image(reference)
     platforms = {(image["os"], image["architecture"]) for image in images.values()}
     if len(platforms) != 1:
         raise ValueError("local release images must share one platform")
     inputs = [ROOT / name for name in ["Cargo.toml", "Cargo.lock", "Dockerfile", ".dockerignore"]]
-    for directory in ["crates", "licenses"]:
+    for directory in ["crates", "licenses", "ops"]:
         inputs.extend(path for path in (ROOT / directory).rglob("*") if path.is_file())
     inputs.extend(ROOT.glob("compose*.yaml"))
     inputs.extend([ROOT / ".env.production.example", ROOT / "LICENSE", ROOT / "THIRD_PARTY_NOTICES.md"])
@@ -84,6 +93,7 @@ def main():
         "tracked_worktree_dirty": bool(command(["git", "status", "--porcelain", "--untracked-files=no"])),
         "image_source_binding": "operator_declared_not_cryptographic_attestation",
         "registry_publication_verified": False,
+        "monitoring_included": args.monitoring,
         "images": images, "build_and_compose_inputs_sha256": hashes,
         "migration_sha256": {name: digest for name, digest in hashes.items() if "/migrations/" in name},
         "model": {"sha256": args.model_sha256, "attestation": "operator_declared" if args.model_sha256 else "not_provided"},
@@ -93,6 +103,8 @@ def main():
     }
     mapping = {name: "application" for name in ["api", "worker", "admin", "migrate", "maintenance"]}
     mapping.update({"parser": "parser", "parser-socket-init": "parser", "postgres": "postgres", "redis": "redis"})
+    if args.monitoring:
+        mapping.update({"prometheus": "prometheus", "alertmanager": "alertmanager"})
     lock = {"services": {service: {"image": images[image]["pinned_reference"], "pull_policy": "never"} for service, image in mapping.items()}}
     backup_lock = {"services": {service: {"image": images["backup"]["pinned_reference"], "pull_policy": "never"} for service in ["backup", "backup-verify"]}}
     args.output.mkdir(mode=0o700, parents=True, exist_ok=False)

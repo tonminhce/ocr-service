@@ -1,4 +1,6 @@
 FROM rust:1-bookworm@sha256:114c7a4425406451c2866b6aafe69fe29b1b298832db1277d411ac73c82d04d6 AS builder
+ARG CARGO_BUILD_JOBS=2
+ENV CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS}
 WORKDIR /app
 COPY Cargo.toml Cargo.lock ./
 COPY crates ./crates

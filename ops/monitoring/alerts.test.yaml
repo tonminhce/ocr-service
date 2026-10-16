@@ -1,0 +1,1119 @@
+rule_files:
+- alerts.yaml
+evaluation_interval: 15s
+tests:
+- name: OCRTargetDown exact hold boundary and recovery for up{job="ocr-api",instance="api:9091"}
+  interval: 15s
+  input_series:
+  - series: up{job="ocr-api",instance="api:9091"}
+    values: 0x11 1x29
+  alert_rule_test:
+  - eval_time: 45s
+    alertname: OCRTargetDown
+    exp_alerts: []
+  - eval_time: 60s
+    alertname: OCRTargetDown
+    exp_alerts:
+    - exp_labels:
+        job: ocr-api
+        instance: api:9091
+        severity: critical
+        policy: candidate-v1
+      exp_annotations: &id001
+        summary: OCR or monitoring metrics target is unavailable
+        runbook: docs/alert-runbook.md#ocrtargetdown
+  - eval_time: 180s
+    alertname: OCRTargetDown
+    exp_alerts: []
+- name: OCRTargetDown exact hold boundary and recovery for up{job="ocr-worker",instance="worker:9092"}
+  interval: 15s
+  input_series:
+  - series: up{job="ocr-worker",instance="worker:9092"}
+    values: 0x11 1x29
+  alert_rule_test:
+  - eval_time: 45s
+    alertname: OCRTargetDown
+    exp_alerts: []
+  - eval_time: 60s
+    alertname: OCRTargetDown
+    exp_alerts:
+    - exp_labels:
+        job: ocr-worker
+        instance: worker:9092
+        severity: critical
+        policy: candidate-v1
+      exp_annotations: *id001
+  - eval_time: 180s
+    alertname: OCRTargetDown
+    exp_alerts: []
+- name: OCRTargetDown exact hold boundary and recovery for up{job="prometheus",instance="prometheus:9090"}
+  interval: 15s
+  input_series:
+  - series: up{job="prometheus",instance="prometheus:9090"}
+    values: 0x11 1x29
+  alert_rule_test:
+  - eval_time: 45s
+    alertname: OCRTargetDown
+    exp_alerts: []
+  - eval_time: 60s
+    alertname: OCRTargetDown
+    exp_alerts:
+    - exp_labels:
+        job: prometheus
+        instance: prometheus:9090
+        severity: critical
+        policy: candidate-v1
+      exp_annotations: *id001
+  - eval_time: 180s
+    alertname: OCRTargetDown
+    exp_alerts: []
+- name: OCRTargetDown exact hold boundary and recovery for up{job="alertmanager",instance="alertmanager:9093"}
+  interval: 15s
+  input_series:
+  - series: up{job="alertmanager",instance="alertmanager:9093"}
+    values: 0x11 1x29
+  alert_rule_test:
+  - eval_time: 45s
+    alertname: OCRTargetDown
+    exp_alerts: []
+  - eval_time: 60s
+    alertname: OCRTargetDown
+    exp_alerts:
+    - exp_labels:
+        job: alertmanager
+        instance: alertmanager:9093
+        severity: critical
+        policy: candidate-v1
+      exp_annotations: *id001
+  - eval_time: 180s
+    alertname: OCRTargetDown
+    exp_alerts: []
+- name: OCRCollectorFailed exact hold boundary and recovery
+  interval: 15s
+  input_series:
+  - series: up{job="ocr-worker",instance="worker:9092"}
+    values: 1x40
+  - series: ocr_operational_collector_error{job="ocr-worker",instance="worker:9092"}
+    values: 1x11 0x29
+  alert_rule_test:
+  - eval_time: 45s
+    alertname: OCRCollectorFailed
+    exp_alerts: []
+  - eval_time: 60s
+    alertname: OCRCollectorFailed
+    exp_alerts:
+    - exp_labels:
+        job: ocr-worker
+        instance: worker:9092
+        severity: warning
+        policy: candidate-v1
+      exp_annotations:
+        summary: PostgreSQL or Redis background observation failed
+        runbook: docs/alert-runbook.md#ocrcollectorfailed
+  - eval_time: 180s
+    alertname: OCRCollectorFailed
+    exp_alerts: []
+- name: OCRCollectorStale exact hold boundary and recovery
+  interval: 15s
+  input_series:
+  - series: up{job="ocr-worker",instance="worker:9092"}
+    values: 1x40
+  - series: ocr_operational_collector_last_success_timestamp_seconds{job="ocr-worker",instance="worker:9092"}
+    values: 1x11 181+15x28
+  alert_rule_test:
+  - eval_time: 150s
+    alertname: OCRCollectorStale
+    exp_alerts: []
+  - eval_time: 165s
+    alertname: OCRCollectorStale
+    exp_alerts:
+    - exp_labels:
+        job: ocr-worker
+        instance: worker:9092
+        severity: warning
+        policy: candidate-v1
+      exp_annotations: &id004
+        summary: Durable queue observation timestamps are stale or invalid
+        runbook: docs/alert-runbook.md#ocrcollectorstale
+  - eval_time: 180s
+    alertname: OCRCollectorStale
+    exp_alerts: []
+- name: OCRDependencyUnavailable exact hold boundary and recovery
+  interval: 15s
+  input_series:
+  - series: up{job="ocr-worker",instance="worker:9092"}
+    values: 1x40
+  - series: ocr_dependency_last_check_timestamp_seconds{job="ocr-worker",instance="worker:9092",dependency="parser"}
+    values: 1+15x40
+  - series: ocr_dependency_up{job="ocr-worker",instance="worker:9092",dependency="parser"}
+    values: 0x11 1x29
+  alert_rule_test:
+  - eval_time: 45s
+    alertname: OCRDependencyUnavailable
+    exp_alerts: []
+  - eval_time: 60s
+    alertname: OCRDependencyUnavailable
+    exp_alerts:
+    - exp_labels:
+        job: ocr-worker
+        instance: worker:9092
+        dependency: parser
+        severity: warning
+        policy: candidate-v1
+      exp_annotations: &id007
+        summary: Bounded parser or model-catalog probe failed
+        runbook: docs/alert-runbook.md#ocrdependencyunavailable
+  - eval_time: 180s
+    alertname: OCRDependencyUnavailable
+    exp_alerts: []
+- name: OCRDependencyProbeStale exact hold boundary and recovery
+  interval: 15s
+  input_series:
+  - series: up{job="ocr-worker",instance="worker:9092"}
+    values: 1x40
+  - series: ocr_dependency_last_check_timestamp_seconds{job="ocr-worker",instance="worker:9092",dependency="parser"}
+    values: 1x11 181+15x28
+  alert_rule_test:
+  - eval_time: 150s
+    alertname: OCRDependencyProbeStale
+    exp_alerts: []
+  - eval_time: 165s
+    alertname: OCRDependencyProbeStale
+    exp_alerts:
+    - exp_labels:
+        job: ocr-worker
+        instance: worker:9092
+        dependency: parser
+        severity: warning
+        policy: candidate-v1
+      exp_annotations: &id008
+        summary: Dependency observation timestamps are stale or invalid
+        runbook: docs/alert-runbook.md#ocrdependencyprobestale
+  - eval_time: 180s
+    alertname: OCRDependencyProbeStale
+    exp_alerts: []
+- name: OCRBacklogAge exact hold boundary and recovery
+  interval: 15s
+  input_series:
+  - series: up{job="ocr-worker",instance="worker:9092"}
+    values: 1x40
+  - series: ocr_operational_collector_last_success_timestamp_seconds{job="ocr-worker",instance="worker:9092"}
+    values: 1+15x40
+  - series: ocr_operational_oldest_eligible_seconds{job="ocr-worker",instance="worker:9092"}
+    values: 600x11 0x29
+  alert_rule_test:
+  - eval_time: 105s
+    alertname: OCRBacklogAge
+    exp_alerts: []
+  - eval_time: 120s
+    alertname: OCRBacklogAge
+    exp_alerts:
+    - exp_labels:
+        job: ocr-worker
+        severity: warning
+        policy: candidate-v1
+      exp_annotations: &id005
+        summary: Eligible OCR jobs have waited over five minutes
+        runbook: docs/alert-runbook.md#ocrbacklogage
+  - eval_time: 180s
+    alertname: OCRBacklogAge
+    exp_alerts: []
+- name: OCROutboxDelayed exact hold boundary and recovery
+  interval: 15s
+  input_series:
+  - series: up{job="ocr-worker",instance="worker:9092"}
+    values: 1x40
+  - series: ocr_operational_collector_last_success_timestamp_seconds{job="ocr-worker",instance="worker:9092"}
+    values: 1+15x40
+  - series: ocr_operational_oldest_due_outbox_seconds{job="ocr-worker",instance="worker:9092"}
+    values: 120x11 0x29
+  alert_rule_test:
+  - eval_time: 45s
+    alertname: OCROutboxDelayed
+    exp_alerts: []
+  - eval_time: 60s
+    alertname: OCROutboxDelayed
+    exp_alerts:
+    - exp_labels:
+        job: ocr-worker
+        severity: warning
+        policy: candidate-v1
+      exp_annotations:
+        summary: Durable dispatch notifications are delayed
+        runbook: docs/alert-runbook.md#ocroutboxdelayed
+  - eval_time: 180s
+    alertname: OCROutboxDelayed
+    exp_alerts: []
+- name: OCRExpiredLeases exact hold boundary and recovery
+  interval: 15s
+  input_series:
+  - series: up{job="ocr-worker",instance="worker:9092"}
+    values: 1x40
+  - series: ocr_operational_collector_last_success_timestamp_seconds{job="ocr-worker",instance="worker:9092"}
+    values: 1+15x40
+  - series: ocr_operational_expired_leases{job="ocr-worker",instance="worker:9092"}
+    values: 1x11 0x29
+  alert_rule_test:
+  - eval_time: 45s
+    alertname: OCRExpiredLeases
+    exp_alerts: []
+  - eval_time: 60s
+    alertname: OCRExpiredLeases
+    exp_alerts:
+    - exp_labels:
+        job: ocr-worker
+        severity: warning
+        policy: candidate-v1
+      exp_annotations:
+        summary: Worker leases remain expired in a fresh snapshot
+        runbook: docs/alert-runbook.md#ocrexpiredleases
+  - eval_time: 180s
+    alertname: OCRExpiredLeases
+    exp_alerts: []
+- name: OCRRedisMemoryHigh exact hold boundary and recovery
+  interval: 15s
+  input_series:
+  - series: up{job="ocr-worker",instance="worker:9092"}
+    values: 1x40
+  - series: ocr_operational_collector_last_success_timestamp_seconds{job="ocr-worker",instance="worker:9092"}
+    values: 1+15x40
+  - series: ocr_operational_redis_memory_bytes{job="ocr-worker",instance="worker:9092"}
+    values: 250000000x11 0x29
+  - series: ocr_operational_redis_maxmemory_bytes{job="ocr-worker",instance="worker:9092"}
+    values: 268435456x40
+  alert_rule_test:
+  - eval_time: 105s
+    alertname: OCRRedisMemoryHigh
+    exp_alerts: []
+  - eval_time: 120s
+    alertname: OCRRedisMemoryHigh
+    exp_alerts:
+    - exp_labels:
+        job: ocr-worker
+        severity: warning
+        policy: candidate-v1
+      exp_annotations:
+        summary: Redis used memory exceeds 85 percent of its configured maxmemory
+        runbook: docs/alert-runbook.md#ocrredismemoryhigh
+  - eval_time: 180s
+    alertname: OCRRedisMemoryHigh
+    exp_alerts: []
+- name: OCRPoolSaturation exact hold boundary and recovery
+  interval: 15s
+  input_series:
+  - series: up{job="ocr-worker",instance="worker:9092"}
+    values: 1x40
+  - series: ocr_runtime_last_sample_timestamp_seconds{job="ocr-worker",instance="worker:9092"}
+    values: 1+15x40
+  - series: ocr_database_pool_connections{job="ocr-worker",instance="worker:9092",state="size"}
+    values: 10x40
+  - series: ocr_database_pool_connections{job="ocr-worker",instance="worker:9092",state="idle"}
+    values: 0x11 10x29
+  - series: ocr_database_pool_connections{job="ocr-worker",instance="worker:9092",state="max"}
+    values: 10x40
+  alert_rule_test:
+  - eval_time: 105s
+    alertname: OCRPoolSaturation
+    exp_alerts: []
+  - eval_time: 120s
+    alertname: OCRPoolSaturation
+    exp_alerts:
+    - exp_labels:
+        job: ocr-worker
+        instance: worker:9092
+        severity: warning
+        policy: candidate-v1
+      exp_annotations: &id006
+        summary: Worker database connections are mostly busy
+        runbook: docs/alert-runbook.md#ocrpoolsaturation
+  - eval_time: 180s
+    alertname: OCRPoolSaturation
+    exp_alerts: []
+- name: OCRJobFailures exact hold boundary and recovery
+  interval: 15s
+  input_series:
+  - series: ocr_job_attempts_total{job="ocr-worker",instance="worker:9092",outcome="failed"}
+    values: 0 4x39
+  alert_rule_test:
+  - eval_time: 60s
+    alertname: OCRJobFailures
+    exp_alerts: []
+  - eval_time: 75s
+    alertname: OCRJobFailures
+    exp_alerts:
+    - exp_labels:
+        job: ocr-worker
+        severity: warning
+        policy: candidate-v1
+      exp_annotations: &id009
+        summary: Observed terminal OCR attempt failures increased by at least three in five minutes
+        runbook: docs/alert-runbook.md#ocrjobfailures
+  - eval_time: 360s
+    alertname: OCRJobFailures
+    exp_alerts: []
+- name: missing collector timestamp is explicit and recovers
+  interval: 15s
+  input_series:
+  - series: up{job="ocr-worker",instance="worker:9092"}
+    values: 1x40
+  - series: ocr_operational_collector_last_success_timestamp_seconds{job="ocr-worker",instance="worker:9092"}
+    values: _ _ _ _ _ _ _ _ _ _ _ _ 181+15x28
+  - series: ocr_runtime_last_sample_timestamp_seconds{job="ocr-worker",instance="worker:9092"}
+    values: 1+15x40
+  alert_rule_test:
+  - eval_time: 45s
+    alertname: OCRObserverMetricsMissing
+    exp_alerts: []
+  - eval_time: 60s
+    alertname: OCRObserverMetricsMissing
+    exp_alerts:
+    - exp_labels:
+        job: ocr-worker
+        instance: worker:9092
+        severity: warning
+        policy: candidate-v1
+      exp_annotations: &id002
+        summary: Worker observer timestamp metrics are missing
+        runbook: docs/alert-runbook.md#ocrobservermetricsmissing
+  - eval_time: 180s
+    alertname: OCRObserverMetricsMissing
+    exp_alerts: []
+- name: missing runtime timestamp is explicit and recovers
+  interval: 15s
+  input_series:
+  - series: up{job="ocr-worker",instance="worker:9092"}
+    values: 1x40
+  - series: ocr_operational_collector_last_success_timestamp_seconds{job="ocr-worker",instance="worker:9092"}
+    values: 1+15x40
+  - series: ocr_runtime_last_sample_timestamp_seconds{job="ocr-worker",instance="worker:9092"}
+    values: _ _ _ _ _ _ _ _ _ _ _ _ 181+15x28
+  alert_rule_test:
+  - eval_time: 45s
+    alertname: OCRObserverMetricsMissing
+    exp_alerts: []
+  - eval_time: 60s
+    alertname: OCRObserverMetricsMissing
+    exp_alerts:
+    - exp_labels:
+        job: ocr-worker
+        instance: worker:9092
+        severity: warning
+        policy: candidate-v1
+      exp_annotations: *id002
+  - eval_time: 180s
+    alertname: OCRObserverMetricsMissing
+    exp_alerts: []
+- name: missing parser up metric is explicit and recovers
+  interval: 15s
+  input_series:
+  - series: up{job="ocr-worker",instance="worker:9092"}
+    values: 1x40
+  - series: ocr_dependency_last_check_timestamp_seconds{job="ocr-worker",instance="worker:9092",dependency="parser"}
+    values: 1+15x40
+  - series: ocr_dependency_up{job="ocr-worker",instance="worker:9092",dependency="parser"}
+    values: _ _ _ _ _ _ _ _ _ _ _ _ 181+15x28
+  - series: ocr_dependency_last_check_timestamp_seconds{job="ocr-worker",instance="worker:9092",dependency="model_catalog"}
+    values: 1+15x40
+  - series: ocr_dependency_up{job="ocr-worker",instance="worker:9092",dependency="model_catalog"}
+    values: 1x40
+  alert_rule_test:
+  - eval_time: 45s
+    alertname: OCRDependencyMetricsMissing
+    exp_alerts: []
+  - eval_time: 60s
+    alertname: OCRDependencyMetricsMissing
+    exp_alerts:
+    - exp_labels:
+        job: ocr-worker
+        instance: worker:9092
+        dependency: parser
+        severity: warning
+        policy: candidate-v1
+      exp_annotations: &id003
+        summary: Expected parser or model-catalog probe metrics are missing
+        runbook: docs/alert-runbook.md#ocrdependencymetricsmissing
+  - eval_time: 180s
+    alertname: OCRDependencyMetricsMissing
+    exp_alerts: []
+- name: missing model_catalog timestamp metric is explicit and recovers
+  interval: 15s
+  input_series:
+  - series: up{job="ocr-worker",instance="worker:9092"}
+    values: 1x40
+  - series: ocr_dependency_last_check_timestamp_seconds{job="ocr-worker",instance="worker:9092",dependency="parser"}
+    values: 1+15x40
+  - series: ocr_dependency_up{job="ocr-worker",instance="worker:9092",dependency="parser"}
+    values: 1x40
+  - series: ocr_dependency_last_check_timestamp_seconds{job="ocr-worker",instance="worker:9092",dependency="model_catalog"}
+    values: _ _ _ _ _ _ _ _ _ _ _ _ 181+15x28
+  - series: ocr_dependency_up{job="ocr-worker",instance="worker:9092",dependency="model_catalog"}
+    values: 1x40
+  alert_rule_test:
+  - eval_time: 45s
+    alertname: OCRDependencyMetricsMissing
+    exp_alerts: []
+  - eval_time: 60s
+    alertname: OCRDependencyMetricsMissing
+    exp_alerts:
+    - exp_labels:
+        job: ocr-worker
+        instance: worker:9092
+        dependency: model_catalog
+        severity: warning
+        policy: candidate-v1
+      exp_annotations: *id003
+  - eval_time: 180s
+    alertname: OCRDependencyMetricsMissing
+    exp_alerts: []
+- name: stale high replica cannot borrow freshness from a healthy low replica
+  interval: 15s
+  input_series:
+  - series: up{job="ocr-worker",instance="worker-a:9092"}
+    values: 1x40
+  - series: up{job="ocr-worker",instance="worker-b:9092"}
+    values: 1x40
+  - series: ocr_operational_collector_last_success_timestamp_seconds{job="ocr-worker",instance="worker-a:9092"}
+    values: 1x40
+  - series: ocr_operational_collector_last_success_timestamp_seconds{job="ocr-worker",instance="worker-b:9092"}
+    values: 1+15x40
+  - series: ocr_operational_oldest_eligible_seconds{job="ocr-worker",instance="worker-a:9092"}
+    values: 9999x40
+  - series: ocr_operational_oldest_due_outbox_seconds{job="ocr-worker",instance="worker-a:9092"}
+    values: 9999x40
+  - series: ocr_operational_expired_leases{job="ocr-worker",instance="worker-a:9092"}
+    values: 99x40
+  - series: ocr_operational_redis_memory_bytes{job="ocr-worker",instance="worker-a:9092"}
+    values: 999999999x40
+  - series: ocr_operational_oldest_eligible_seconds{job="ocr-worker",instance="worker-b:9092"}
+    values: '0x40'
+  - series: ocr_operational_oldest_due_outbox_seconds{job="ocr-worker",instance="worker-b:9092"}
+    values: '0x40'
+  - series: ocr_operational_expired_leases{job="ocr-worker",instance="worker-b:9092"}
+    values: '0x40'
+  - series: ocr_operational_redis_memory_bytes{job="ocr-worker",instance="worker-b:9092"}
+    values: '0x40'
+  - series: ocr_operational_redis_maxmemory_bytes{job="ocr-worker",instance="worker-a:9092"}
+    values: 268435456x40
+  - series: ocr_operational_redis_maxmemory_bytes{job="ocr-worker",instance="worker-b:9092"}
+    values: 268435456x40
+  alert_rule_test:
+  - eval_time: 300s
+    alertname: OCRBacklogAge
+    exp_alerts: []
+  - eval_time: 300s
+    alertname: OCROutboxDelayed
+    exp_alerts: []
+  - eval_time: 300s
+    alertname: OCRExpiredLeases
+    exp_alerts: []
+  - eval_time: 300s
+    alertname: OCRRedisMemoryHigh
+    exp_alerts: []
+  - eval_time: 300s
+    alertname: OCRCollectorStale
+    exp_alerts:
+    - exp_labels:
+        job: ocr-worker
+        instance: worker-a:9092
+        severity: warning
+        policy: candidate-v1
+      exp_annotations: *id004
+  promql_expr_test:
+  - expr: ocr:operational_fresh
+    eval_time: 300s
+    exp_samples:
+    - labels: '{__name__="ocr:operational_fresh",job="ocr-worker",instance="worker-b:9092"}'
+      value: -1
+- name: fresh zero snapshots on two replicas remain quiet
+  interval: 15s
+  input_series:
+  - series: up{job="ocr-worker",instance="worker-a:9092"}
+    values: 1x40
+  - series: up{job="ocr-worker",instance="worker-b:9092"}
+    values: 1x40
+  - series: ocr_operational_collector_last_success_timestamp_seconds{job="ocr-worker",instance="worker-a:9092"}
+    values: 1+15x40
+  - series: ocr_operational_collector_last_success_timestamp_seconds{job="ocr-worker",instance="worker-b:9092"}
+    values: 1+15x40
+  - series: ocr_operational_oldest_eligible_seconds{job="ocr-worker",instance="worker-a:9092"}
+    values: '0x40'
+  - series: ocr_operational_oldest_due_outbox_seconds{job="ocr-worker",instance="worker-a:9092"}
+    values: '0x40'
+  - series: ocr_operational_expired_leases{job="ocr-worker",instance="worker-a:9092"}
+    values: '0x40'
+  - series: ocr_operational_redis_memory_bytes{job="ocr-worker",instance="worker-a:9092"}
+    values: '0x40'
+  - series: ocr_operational_oldest_eligible_seconds{job="ocr-worker",instance="worker-b:9092"}
+    values: '0x40'
+  - series: ocr_operational_oldest_due_outbox_seconds{job="ocr-worker",instance="worker-b:9092"}
+    values: '0x40'
+  - series: ocr_operational_expired_leases{job="ocr-worker",instance="worker-b:9092"}
+    values: '0x40'
+  - series: ocr_operational_redis_memory_bytes{job="ocr-worker",instance="worker-b:9092"}
+    values: '0x40'
+  - series: ocr_operational_redis_maxmemory_bytes{job="ocr-worker",instance="worker-a:9092"}
+    values: 268435456x40
+  - series: ocr_operational_redis_maxmemory_bytes{job="ocr-worker",instance="worker-b:9092"}
+    values: 268435456x40
+  alert_rule_test:
+  - eval_time: 300s
+    alertname: OCRBacklogAge
+    exp_alerts: []
+  - eval_time: 300s
+    alertname: OCROutboxDelayed
+    exp_alerts: []
+  - eval_time: 300s
+    alertname: OCRExpiredLeases
+    exp_alerts: []
+  - eval_time: 300s
+    alertname: OCRRedisMemoryHigh
+    exp_alerts: []
+- name: shared durable gauges aggregate with maximum rather than sum
+  interval: 15s
+  input_series:
+  - series: up{job="ocr-worker",instance="worker-a:9092"}
+    values: 1x40
+  - series: up{job="ocr-worker",instance="worker-b:9092"}
+    values: 1x40
+  - series: ocr_operational_collector_last_success_timestamp_seconds{job="ocr-worker",instance="worker-a:9092"}
+    values: 1+15x40
+  - series: ocr_operational_collector_last_success_timestamp_seconds{job="ocr-worker",instance="worker-b:9092"}
+    values: 1+15x40
+  - series: ocr_operational_oldest_eligible_seconds{job="ocr-worker",instance="worker-a:9092"}
+    values: 200x40
+  - series: ocr_operational_oldest_due_outbox_seconds{job="ocr-worker",instance="worker-a:9092"}
+    values: 40x40
+  - series: ocr_operational_expired_leases{job="ocr-worker",instance="worker-a:9092"}
+    values: '0x40'
+  - series: ocr_operational_redis_memory_bytes{job="ocr-worker",instance="worker-a:9092"}
+    values: 150000000x40
+  - series: ocr_operational_oldest_eligible_seconds{job="ocr-worker",instance="worker-b:9092"}
+    values: 200x40
+  - series: ocr_operational_oldest_due_outbox_seconds{job="ocr-worker",instance="worker-b:9092"}
+    values: 40x40
+  - series: ocr_operational_expired_leases{job="ocr-worker",instance="worker-b:9092"}
+    values: '0x40'
+  - series: ocr_operational_redis_memory_bytes{job="ocr-worker",instance="worker-b:9092"}
+    values: 150000000x40
+  - series: ocr_operational_redis_maxmemory_bytes{job="ocr-worker",instance="worker-a:9092"}
+    values: 268435456x40
+  - series: ocr_operational_redis_maxmemory_bytes{job="ocr-worker",instance="worker-b:9092"}
+    values: 268435456x40
+  alert_rule_test:
+  - eval_time: 300s
+    alertname: OCRBacklogAge
+    exp_alerts: []
+  - eval_time: 300s
+    alertname: OCROutboxDelayed
+    exp_alerts: []
+  - eval_time: 300s
+    alertname: OCRExpiredLeases
+    exp_alerts: []
+  - eval_time: 300s
+    alertname: OCRRedisMemoryHigh
+    exp_alerts: []
+- name: one fresh high replica produces one shared backlog alert
+  interval: 15s
+  input_series:
+  - series: up{job="ocr-worker",instance="worker-a:9092"}
+    values: 1x40
+  - series: up{job="ocr-worker",instance="worker-b:9092"}
+    values: 1x40
+  - series: ocr_operational_collector_last_success_timestamp_seconds{job="ocr-worker",instance="worker-a:9092"}
+    values: 1+15x40
+  - series: ocr_operational_collector_last_success_timestamp_seconds{job="ocr-worker",instance="worker-b:9092"}
+    values: 1+15x40
+  - series: ocr_operational_oldest_eligible_seconds{job="ocr-worker",instance="worker-a:9092"}
+    values: '0x40'
+  - series: ocr_operational_oldest_eligible_seconds{job="ocr-worker",instance="worker-b:9092"}
+    values: 600x40
+  alert_rule_test:
+  - eval_time: 105s
+    alertname: OCRBacklogAge
+    exp_alerts: []
+  - eval_time: 120s
+    alertname: OCRBacklogAge
+    exp_alerts:
+    - exp_labels:
+        job: ocr-worker
+        severity: warning
+        policy: candidate-v1
+      exp_annotations: *id005
+- name: failed scrape suppresses stale cached resource and dependency alerts
+  interval: 15s
+  input_series:
+  - series: up{job="ocr-worker",instance="worker:9092"}
+    values: '0x40'
+  - series: ocr_operational_collector_last_success_timestamp_seconds{job="ocr-worker",instance="worker:9092"}
+    values: 1+15x40
+  - series: ocr_runtime_last_sample_timestamp_seconds{job="ocr-worker",instance="worker:9092"}
+    values: 1+15x40
+  - series: ocr_dependency_last_check_timestamp_seconds{job="ocr-worker",instance="worker:9092",dependency="parser"}
+    values: 1+15x40
+  - series: ocr_dependency_up{job="ocr-worker",instance="worker:9092",dependency="parser"}
+    values: '0x40'
+  - series: ocr_operational_collector_error{job="ocr-worker",instance="worker:9092"}
+    values: 1x40
+  - series: ocr_database_pool_connections{job="ocr-worker",instance="worker:9092",state="size"}
+    values: 10x40
+  - series: ocr_database_pool_connections{job="ocr-worker",instance="worker:9092",state="idle"}
+    values: '0x40'
+  - series: ocr_database_pool_connections{job="ocr-worker",instance="worker:9092",state="max"}
+    values: 10x40
+  - series: ocr_operational_oldest_eligible_seconds{job="ocr-worker",instance="worker:9092"}
+    values: 9999x40
+  - series: ocr_operational_oldest_due_outbox_seconds{job="ocr-worker",instance="worker:9092"}
+    values: 9999x40
+  - series: ocr_operational_expired_leases{job="ocr-worker",instance="worker:9092"}
+    values: 99x40
+  - series: ocr_operational_redis_memory_bytes{job="ocr-worker",instance="worker:9092"}
+    values: 999999999x40
+  - series: ocr_operational_redis_maxmemory_bytes{job="ocr-worker",instance="worker:9092"}
+    values: 268435456x40
+  alert_rule_test:
+  - eval_time: 300s
+    alertname: OCRBacklogAge
+    exp_alerts: []
+  - eval_time: 300s
+    alertname: OCROutboxDelayed
+    exp_alerts: []
+  - eval_time: 300s
+    alertname: OCRExpiredLeases
+    exp_alerts: []
+  - eval_time: 300s
+    alertname: OCRRedisMemoryHigh
+    exp_alerts: []
+  - eval_time: 300s
+    alertname: OCRCollectorStale
+    exp_alerts: []
+  - eval_time: 300s
+    alertname: OCRCollectorFailed
+    exp_alerts: []
+  - eval_time: 300s
+    alertname: OCRDependencyUnavailable
+    exp_alerts: []
+  - eval_time: 300s
+    alertname: OCRDependencyProbeStale
+    exp_alerts: []
+  - eval_time: 300s
+    alertname: OCRObserverMetricsMissing
+    exp_alerts: []
+  - eval_time: 300s
+    alertname: OCRDependencyMetricsMissing
+    exp_alerts: []
+  - eval_time: 300s
+    alertname: OCRPoolSaturation
+    exp_alerts: []
+- name: stopped runtime observer never reports cached pool saturation as current
+  interval: 15s
+  input_series:
+  - series: up{job="ocr-worker",instance="worker:9092"}
+    values: 1x40
+  - series: ocr_runtime_last_sample_timestamp_seconds{job="ocr-worker",instance="worker:9092"}
+    values: 1x40
+  - series: ocr_database_pool_connections{job="ocr-worker",instance="worker:9092",state="size"}
+    values: 10x40
+  - series: ocr_database_pool_connections{job="ocr-worker",instance="worker:9092",state="idle"}
+    values: '0x40'
+  - series: ocr_database_pool_connections{job="ocr-worker",instance="worker:9092",state="max"}
+    values: 10x40
+  alert_rule_test:
+  - eval_time: 300s
+    alertname: OCRPoolSaturation
+    exp_alerts: []
+- name: fresh runtime pool observation is independent of durable Redis collector success
+  interval: 15s
+  input_series:
+  - series: up{job="ocr-worker",instance="worker:9092"}
+    values: 1x40
+  - series: ocr_runtime_last_sample_timestamp_seconds{job="ocr-worker",instance="worker:9092"}
+    values: 1+15x40
+  - series: ocr_operational_collector_last_success_timestamp_seconds{job="ocr-worker",instance="worker:9092"}
+    values: '0x40'
+  - series: ocr_database_pool_connections{job="ocr-worker",instance="worker:9092",state="size"}
+    values: 10x40
+  - series: ocr_database_pool_connections{job="ocr-worker",instance="worker:9092",state="idle"}
+    values: '0x40'
+  - series: ocr_database_pool_connections{job="ocr-worker",instance="worker:9092",state="max"}
+    values: 10x40
+  alert_rule_test:
+  - eval_time: 105s
+    alertname: OCRPoolSaturation
+    exp_alerts: []
+  - eval_time: 120s
+    alertname: OCRPoolSaturation
+    exp_alerts:
+    - exp_labels:
+        job: ocr-worker
+        instance: worker:9092
+        severity: warning
+        policy: candidate-v1
+      exp_annotations: *id006
+- name: failed dependency transitions from recent failure to stale-only observation
+  interval: 15s
+  input_series:
+  - series: up{job="ocr-worker",instance="worker:9092"}
+    values: 1x40
+  - series: ocr_dependency_last_check_timestamp_seconds{job="ocr-worker",instance="worker:9092",dependency="parser"}
+    values: 1x40
+  - series: ocr_dependency_up{job="ocr-worker",instance="worker:9092",dependency="parser"}
+    values: '0x40'
+  alert_rule_test:
+  - eval_time: 60s
+    alertname: OCRDependencyUnavailable
+    exp_alerts:
+    - exp_labels:
+        job: ocr-worker
+        instance: worker:9092
+        dependency: parser
+        severity: warning
+        policy: candidate-v1
+      exp_annotations: *id007
+  - eval_time: 105s
+    alertname: OCRDependencyUnavailable
+    exp_alerts: []
+  - eval_time: 150s
+    alertname: OCRDependencyProbeStale
+    exp_alerts: []
+  - eval_time: 165s
+    alertname: OCRDependencyProbeStale
+    exp_alerts:
+    - exp_labels:
+        job: ocr-worker
+        instance: worker:9092
+        dependency: parser
+        severity: warning
+        policy: candidate-v1
+      exp_annotations: *id008
+  - eval_time: 300s
+    alertname: OCRDependencyUnavailable
+    exp_alerts: []
+- name: zero dependency timestamp is unobserved rather than known failed
+  interval: 15s
+  input_series:
+  - series: up{job="ocr-worker",instance="worker:9092"}
+    values: 1x40
+  - series: ocr_dependency_last_check_timestamp_seconds{job="ocr-worker",instance="worker:9092",dependency="parser"}
+    values: '0x40'
+  - series: ocr_dependency_up{job="ocr-worker",instance="worker:9092",dependency="parser"}
+    values: '0x40'
+  alert_rule_test:
+  - eval_time: 60s
+    alertname: OCRDependencyUnavailable
+    exp_alerts: []
+  - eval_time: 300s
+    alertname: OCRDependencyUnavailable
+    exp_alerts: []
+  - eval_time: 150s
+    alertname: OCRDependencyProbeStale
+    exp_alerts: []
+  - eval_time: 165s
+    alertname: OCRDependencyProbeStale
+    exp_alerts:
+    - exp_labels:
+        job: ocr-worker
+        instance: worker:9092
+        dependency: parser
+        severity: warning
+        policy: candidate-v1
+      exp_annotations: *id008
+- name: missing whole dependency series does not disappear silently
+  interval: 15s
+  input_series:
+  - series: up{job="ocr-worker",instance="worker:9092"}
+    values: 1x40
+  - series: ocr_dependency_last_check_timestamp_seconds{job="ocr-worker",instance="worker:9092",dependency="model_catalog"}
+    values: 1+15x40
+  - series: ocr_dependency_up{job="ocr-worker",instance="worker:9092",dependency="model_catalog"}
+    values: 1x40
+  alert_rule_test:
+  - eval_time: 45s
+    alertname: OCRDependencyMetricsMissing
+    exp_alerts: []
+  - eval_time: 60s
+    alertname: OCRDependencyMetricsMissing
+    exp_alerts:
+    - exp_labels:
+        job: ocr-worker
+        instance: worker:9092
+        dependency: parser
+        severity: warning
+        policy: candidate-v1
+      exp_annotations: *id003
+- name: process counter reset is not a burst of failures
+  interval: 15s
+  input_series:
+  - series: ocr_job_attempts_total{job="ocr-worker",instance="worker:9092",outcome="failed"}
+    values: 100x3 0x36
+  alert_rule_test:
+  - eval_time: 120s
+    alertname: OCRJobFailures
+    exp_alerts: []
+  - eval_time: 300s
+    alertname: OCRJobFailures
+    exp_alerts: []
+- name: failure increases are calculated per replica before summing
+  interval: 15s
+  input_series:
+  - series: ocr_job_attempts_total{job="ocr-worker",instance="worker-a:9092",outcome="failed"}
+    values: 0 2x39
+  - series: ocr_job_attempts_total{job="ocr-worker",instance="worker-b:9092",outcome="failed"}
+    values: 0 2x39
+  alert_rule_test:
+  - eval_time: 60s
+    alertname: OCRJobFailures
+    exp_alerts: []
+  - eval_time: 75s
+    alertname: OCRJobFailures
+    exp_alerts:
+    - exp_labels:
+        job: ocr-worker
+        severity: warning
+        policy: candidate-v1
+      exp_annotations: *id009
+  - eval_time: 360s
+    alertname: OCRJobFailures
+    exp_alerts: []
+- name: strict durable thresholds remain quiet at equality
+  interval: 15s
+  input_series:
+  - series: up{job="ocr-worker",instance="worker:9092"}
+    values: 1x40
+  - series: ocr_operational_collector_last_success_timestamp_seconds{job="ocr-worker",instance="worker:9092"}
+    values: 1+15x40
+  - series: ocr_operational_oldest_eligible_seconds{job="ocr-worker",instance="worker:9092"}
+    values: 300x40
+  - series: ocr_operational_oldest_due_outbox_seconds{job="ocr-worker",instance="worker:9092"}
+    values: 60x40
+  - series: ocr_operational_expired_leases{job="ocr-worker",instance="worker:9092"}
+    values: '0x40'
+  - series: ocr_operational_redis_memory_bytes{job="ocr-worker",instance="worker:9092"}
+    values: 228170137x40
+  - series: ocr_operational_redis_maxmemory_bytes{job="ocr-worker",instance="worker:9092"}
+    values: 268435456x40
+  alert_rule_test:
+  - eval_time: 300s
+    alertname: OCRBacklogAge
+    exp_alerts: []
+  - eval_time: 300s
+    alertname: OCROutboxDelayed
+    exp_alerts: []
+  - eval_time: 300s
+    alertname: OCRExpiredLeases
+    exp_alerts: []
+  - eval_time: 300s
+    alertname: OCRRedisMemoryHigh
+    exp_alerts: []
+- name: pool threshold includes exactly ninety percent
+  interval: 15s
+  input_series:
+  - series: up{job="ocr-worker",instance="worker:9092"}
+    values: 1x40
+  - series: ocr_runtime_last_sample_timestamp_seconds{job="ocr-worker",instance="worker:9092"}
+    values: 1+15x40
+  - series: ocr_database_pool_connections{job="ocr-worker",instance="worker:9092",state="size"}
+    values: 10x40
+  - series: ocr_database_pool_connections{job="ocr-worker",instance="worker:9092",state="idle"}
+    values: 1x40
+  - series: ocr_database_pool_connections{job="ocr-worker",instance="worker:9092",state="max"}
+    values: 10x40
+  alert_rule_test:
+  - eval_time: 105s
+    alertname: OCRPoolSaturation
+    exp_alerts: []
+  - eval_time: 120s
+    alertname: OCRPoolSaturation
+    exp_alerts:
+    - exp_labels:
+        job: ocr-worker
+        instance: worker:9092
+        severity: warning
+        policy: candidate-v1
+      exp_annotations: *id006
+- name: pool below threshold stays quiet
+  interval: 15s
+  input_series:
+  - series: up{job="ocr-worker",instance="worker:9092"}
+    values: 1x40
+  - series: ocr_runtime_last_sample_timestamp_seconds{job="ocr-worker",instance="worker:9092"}
+    values: 1+15x40
+  - series: ocr_database_pool_connections{job="ocr-worker",instance="worker:9092",state="size"}
+    values: 10x40
+  - series: ocr_database_pool_connections{job="ocr-worker",instance="worker:9092",state="idle"}
+    values: 2x40
+  - series: ocr_database_pool_connections{job="ocr-worker",instance="worker:9092",state="max"}
+    values: 10x40
+  alert_rule_test:
+  - eval_time: 300s
+    alertname: OCRPoolSaturation
+    exp_alerts: []
+- name: future timestamps beyond five-second clock allowance are invalid
+  interval: 15s
+  input_series:
+  - series: up{job="ocr-worker",instance="worker:9092"}
+    values: 1x40
+  - series: ocr_operational_collector_last_success_timestamp_seconds{job="ocr-worker",instance="worker:9092"}
+    values: 600x40
+  - series: ocr_dependency_last_check_timestamp_seconds{job="ocr-worker",instance="worker:9092",dependency="parser"}
+    values: 600x40
+  - series: ocr_dependency_up{job="ocr-worker",instance="worker:9092",dependency="parser"}
+    values: '0x40'
+  - series: ocr_operational_oldest_eligible_seconds{job="ocr-worker",instance="worker:9092"}
+    values: 9999x40
+  - series: ocr_operational_oldest_due_outbox_seconds{job="ocr-worker",instance="worker:9092"}
+    values: 9999x40
+  - series: ocr_operational_expired_leases{job="ocr-worker",instance="worker:9092"}
+    values: 99x40
+  - series: ocr_operational_redis_memory_bytes{job="ocr-worker",instance="worker:9092"}
+    values: 999999999x40
+  - series: ocr_operational_redis_maxmemory_bytes{job="ocr-worker",instance="worker:9092"}
+    values: 268435456x40
+  alert_rule_test:
+  - eval_time: 120s
+    alertname: OCRBacklogAge
+    exp_alerts: []
+  - eval_time: 120s
+    alertname: OCROutboxDelayed
+    exp_alerts: []
+  - eval_time: 120s
+    alertname: OCRExpiredLeases
+    exp_alerts: []
+  - eval_time: 120s
+    alertname: OCRRedisMemoryHigh
+    exp_alerts: []
+  - eval_time: 60s
+    alertname: OCRCollectorStale
+    exp_alerts:
+    - exp_labels:
+        job: ocr-worker
+        instance: worker:9092
+        severity: warning
+        policy: candidate-v1
+      exp_annotations: *id004
+  - eval_time: 60s
+    alertname: OCRDependencyProbeStale
+    exp_alerts:
+    - exp_labels:
+        job: ocr-worker
+        instance: worker:9092
+        dependency: parser
+        severity: warning
+        policy: candidate-v1
+      exp_annotations: *id008
+  - eval_time: 120s
+    alertname: OCRDependencyUnavailable
+    exp_alerts: []
+- name: backlog hold restarts after a brief recovery
+  interval: 15s
+  input_series:
+  - series: up{job="ocr-worker",instance="worker:9092"}
+    values: 1x40
+  - series: ocr_operational_collector_last_success_timestamp_seconds{job="ocr-worker",instance="worker:9092"}
+    values: 1+15x40
+  - series: ocr_operational_oldest_eligible_seconds{job="ocr-worker",instance="worker:9092"}
+    values: 600x3 0 600x35
+  alert_rule_test:
+  - eval_time: 180s
+    alertname: OCRBacklogAge
+    exp_alerts: []
+  - eval_time: 195s
+    alertname: OCRBacklogAge
+    exp_alerts:
+    - exp_labels:
+        job: ocr-worker
+        severity: warning
+        policy: candidate-v1
+      exp_annotations: *id005
+- name: collector freshness includes ninety seconds then expires
+  interval: 15s
+  input_series:
+  - series: up{job="ocr-worker",instance="worker:9092"}
+    values: 1x40
+  - series: ocr_operational_collector_last_success_timestamp_seconds{job="ocr-worker",instance="worker:9092"}
+    values: 15x40
+  alert_rule_test:
+  - eval_time: 165s
+    alertname: OCRCollectorStale
+    exp_alerts: []
+  - eval_time: 180s
+    alertname: OCRCollectorStale
+    exp_alerts:
+    - exp_labels:
+        job: ocr-worker
+        instance: worker:9092
+        severity: warning
+        policy: candidate-v1
+      exp_annotations: *id004
+  promql_expr_test:
+  - expr: ocr:operational_fresh
+    eval_time: 105s
+    exp_samples:
+    - labels: '{__name__="ocr:operational_fresh",job="ocr-worker",instance="worker:9092"}'
+      value: 90
+  - expr: ocr:operational_fresh
+    eval_time: 120s
+    exp_samples: []
+- name: Redis configured 128MiB limit gives early warning below container budget
+  interval: 15s
+  input_series:
+  - series: up{job="ocr-worker",instance="worker:9092"}
+    values: 1x40
+  - series: ocr_operational_collector_last_success_timestamp_seconds{job="ocr-worker",instance="worker:9092"}
+    values: 1+15x40
+  - series: ocr_operational_redis_memory_bytes{job="ocr-worker",instance="worker:9092"}
+    values: 120000000x11 1000000x29
+  - series: ocr_operational_redis_maxmemory_bytes{job="ocr-worker",instance="worker:9092"}
+    values: 134217728x40
+  alert_rule_test:
+  - eval_time: 105s
+    alertname: OCRRedisMemoryHigh
+    exp_alerts: []
+  - eval_time: 120s
+    alertname: OCRRedisMemoryHigh
+    exp_alerts:
+    - exp_labels:
+        job: ocr-worker
+        severity: warning
+        policy: candidate-v1
+      exp_annotations:
+        summary: Redis used memory exceeds 85 percent of its configured maxmemory
+        runbook: docs/alert-runbook.md#ocrredismemoryhigh
+  - eval_time: 180s
+    alertname: OCRRedisMemoryHigh
+    exp_alerts: []
+- name: Redis unlimited maxmemory disables ratio alert rather than claiming safe capacity
+  interval: 15s
+  input_series:
+  - series: up{job="ocr-worker",instance="worker:9092"}
+    values: 1x40
+  - series: ocr_operational_collector_last_success_timestamp_seconds{job="ocr-worker",instance="worker:9092"}
+    values: 1+15x40
+  - series: ocr_operational_redis_memory_bytes{job="ocr-worker",instance="worker:9092"}
+    values: 999999999x40
+  - series: ocr_operational_redis_maxmemory_bytes{job="ocr-worker",instance="worker:9092"}
+    values: '0x40'
+  alert_rule_test:
+  - eval_time: 120s
+    alertname: OCRRedisMemoryHigh
+    exp_alerts: []
+  - eval_time: 300s
+    alertname: OCRRedisMemoryHigh
+    exp_alerts: []
+- name: Redis ratio remains quiet at exactly eighty-five percent
+  interval: 15s
+  input_series:
+  - series: up{job="ocr-worker",instance="worker:9092"}
+    values: 1x40
+  - series: ocr_operational_collector_last_success_timestamp_seconds{job="ocr-worker",instance="worker:9092"}
+    values: 1+15x40
+  - series: ocr_operational_redis_memory_bytes{job="ocr-worker",instance="worker:9092"}
+    values: 85x40
+  - series: ocr_operational_redis_maxmemory_bytes{job="ocr-worker",instance="worker:9092"}
+    values: 100x40
+  alert_rule_test:
+  - eval_time: 120s
+    alertname: OCRRedisMemoryHigh
+    exp_alerts: []
+  - eval_time: 300s
+    alertname: OCRRedisMemoryHigh
+    exp_alerts: []

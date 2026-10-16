@@ -27,6 +27,10 @@ async fn main() -> anyhow::Result<()> {
     };
     let app = Router::new()
         .route("/health", get(|| async { "ok" }))
+        .route(
+            "/v1/models",
+            get(|| async { Json(json!({"data":[{"id":"mock-ocr"}]})) }),
+        )
         .route("/v1/chat/completions", post(completion))
         .with_state(delay);
     let listener = tokio::net::TcpListener::bind(&bind).await?;

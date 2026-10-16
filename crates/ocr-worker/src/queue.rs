@@ -126,13 +126,14 @@ impl RedisQueue {
     }
 
     /// Cached by the background observer; never called by request or scrape paths.
-    pub async fn operational_snapshot(&self) -> Result<(u64, u64), QueueError> {
+    pub async fn operational_snapshot(&self) -> Result<(u64, u64, u64), QueueError> {
         let pending: redis::streams::StreamPendingReply = self
             .query(redis::cmd("XPENDING").arg(&self.stream).arg(&self.group))
             .await?;
         let info: String = self.query(redis::cmd("INFO").arg("memory")).await?;
         let used_memory = parse_used_memory(&info).ok_or(QueueError::Command)?;
-        Ok((pending.count() as u64, used_memory))
+        let maxmemory = parse_memory_field(&info, "maxmemory:").ok_or(QueueError::Command)?;
+        Ok((pending.count() as u64, used_memory, maxmemory))
     }
 
     /// Notifications contain only a job ID. Original bytes and result payloads
@@ -220,8 +221,12 @@ impl RedisQueue {
 }
 
 fn parse_used_memory(info: &str) -> Option<u64> {
+    parse_memory_field(info, "used_memory:")
+}
+
+fn parse_memory_field(info: &str, prefix: &str) -> Option<u64> {
     info.lines()
-        .find_map(|line| line.strip_prefix("used_memory:"))?
+        .find_map(|line| line.strip_prefix(prefix))?
         .parse()
         .ok()
 }
@@ -267,6 +272,20 @@ mod tests {
         assert_eq!(parse_used_memory("used_memory:-1\n"), None);
         assert_eq!(parse_used_memory("used_memory:unknown\n"), None);
         assert_eq!(parse_used_memory("used_memory_peak:8192\n"), None);
+        assert_eq!(parse_memory_field("maxmemory:0\r\n", "maxmemory:"), Some(0));
+        assert_eq!(
+            parse_memory_field("maxmemory:134217728\n", "maxmemory:"),
+            Some(134_217_728)
+        );
+        assert_eq!(parse_memory_field("maxmemory:-1\n", "maxmemory:"), None);
+        assert_eq!(
+            parse_memory_field("maxmemory:18446744073709551616\n", "maxmemory:"),
+            None
+        );
+        assert_eq!(
+            parse_memory_field("maxmemory_human:128M\n", "maxmemory:"),
+            None
+        );
     }
 
     #[tokio::test]
@@ -318,12 +337,18 @@ mod tests {
             consumer: consumer.into(),
             timeout: Duration::from_secs(2),
         };
-        let (pending, memory) = queue
+        let (pending, memory, maxmemory) = queue
             .operational_snapshot()
             .await
             .expect("observer commands must return bounded metrics");
         assert_eq!(pending, 1);
         assert!(memory > 0);
+        let info: String = redis::cmd("INFO")
+            .arg("memory")
+            .query_async(&mut connection)
+            .await
+            .unwrap();
+        assert_eq!(Some(maxmemory), parse_memory_field(&info, "maxmemory:"));
 
         let _: i64 = redis::cmd("DEL")
             .arg(&stream)
