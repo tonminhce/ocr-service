@@ -13,6 +13,10 @@ pub struct Detector {
 
 impl Detector {
     pub fn load(path: &Path, digest: &str) -> Result<Self> {
+        Self::load_with_cpu_arena(path, digest, true)
+    }
+
+    pub fn load_with_cpu_arena(path: &Path, digest: &str, cpu_arena_enabled: bool) -> Result<Self> {
         ensure!(
             digest.len() == 64 && digest.bytes().all(|b| b.is_ascii_hexdigit()),
             "layout model SHA-256 is required"
@@ -29,9 +33,15 @@ impl Detector {
             format!("{:x}", Sha256::digest(&bytes)) == digest.to_ascii_lowercase(),
             "layout model SHA-256 mismatch"
         );
-        let session = Session::builder()?
+        let mut builder = Session::builder()?
             .with_intra_threads(2)?
-            .with_inter_threads(1)?
+            .with_inter_threads(1)?;
+        if !cpu_arena_enabled {
+            builder = builder.with_execution_providers([ort::ep::CPU::default()
+                .with_arena_allocator(false)
+                .build()])?;
+        }
+        let session = builder
             .commit_from_memory(&bytes)
             .context("cannot load PP-DocLayoutV3 graph")?;
         Ok(Self { session })

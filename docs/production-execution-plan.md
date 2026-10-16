@@ -12,7 +12,7 @@ Tài liệu chuyển [roadmap nghiên cứu](production-next-roadmap.md) thành 
 | E01 | Bounded truthful telemetry đã có; full verification trong M1 report |
 | B03/F00 independent corpus | WAITING_FOR_DATA; không tự sinh gold từ machine OCR |
 | A03 | IMPLEMENTED / VERIFIED ISOLATED: 205 ordinary +67 explicit integration tests; packaged restricted-role Docker flow qua. Live adoption/cutover chưa làm |
-| E02 | AUDIT + OBSERVER VERIFIED: helper giữ khoảng1,58GiB;7 focused observer tests + live idle smoke qua. Allocator A/B, workload envelope/headroom chưa qua |
+| E02 | AUDIT + OBSERVER VERIFIED; allocator A/B mode prepared. 2026-10-16 read-only snapshot: live worker 1.72/2 GiB current and 1.876 GiB peak; host swap 12.99/14.34 GiB used with 1.34 GiB free. A/B intentionally not run under current headroom; no memory/performance gain claimed |
 | A04 | IMPLEMENTED / VERIFIED ISOLATED: 209 ordinary +78 explicit integration tests toàn workspace; 11 retention race/guard tests và packaged Docker hold→completion→release qua. [Trace](a04-execution-trace.md). Policy/apply/live cutover vẫn chưa thực hiện |
 | A05 | IMPLEMENTED / VERIFIED LOCAL ISOLATED: Rust PG18/age tooling, 227 ordinary +86 explicit integration; Linux17 binary tests; two full restores and empty-Redis worker recovery. [Trace](a05-execution-trace.md). Off-host/PITR/RPO/RTO/deletion reconciliation/live activation remain gated |
 | A06a | IMPLEMENTED / VERIFIED:240 ordinary +86 explicit integration trên Mac;86 Linux ARM64 release tests. [Trace](a06a-execution-trace.md). Env/commands/process-group/scratch/shutdown hygiene; chưa phải parser sandbox |
@@ -228,9 +228,9 @@ completion đã qua tests. Policy không tự suy từ `RETENTION_DAYS`; apply l
 
 ### E02 — Memory trước concurrency
 
-**Trạng thái:** [allocation-owner audit + observer](e02-memory-audit.md) đã kiểm; cgroup peak1,75/2GiB và helper retained khoảng1,58GiB. Chưa có allocator A/B, optimization promotion, representative workload envelope hoặc capacity gate. Không tăng W/R/pool.
+**Trạng thái:** [allocation-owner audit + observer](e02-memory-audit.md) đã kiểm; allocator A/B control `layout-detect --cpu-arena on|off` is implemented with the production default unchanged. Chưa có allocator measurement, optimization promotion, representative workload envelope hoặc capacity gate. Ngày 16/10 host có 12.99/14.34 GiB swap-used, live worker 1.72/2 GiB current; A/B was intentionally deferred to avoid further pressure. Không tăng W/R/pool.
 
-- **Files:** profiling tool/report mới; source changes chỉ sau allocation evidence ở preparation/inference/formatting/helper lifecycle.
+- **Files:** bounded memory profiler/report and one-off allocator switch; further source optimization only after allocation evidence in preparation/inference/formatting/helper lifecycle.
 - **Workload:** 3 synthetic smoke + 6–12 dev documents thấp/trung/cao page-region count và max-size stress fixtures; số mẫu này chỉ tìm vấn đề memory.
 - **Measure:** worker cgroup/current/peak/events, helper RSS/CPU/threads, Docker VM, native model memory và host pressure/swap riêng. Không cộng RSS/unified-memory metrics chồng lấn. Trace nguồn, crop/PNG/base64/JSON copies và đồng thời giữ ảnh.
 - **Gate:** baseline 1,75/2 GiB chưa đủ headroom thử nghiệm 75–80%; cần giảm live buffers hoặc sizing có số đo trước W/R sweep. Dừng khi OOM, swap tăng kéo dài, lease failure hoặc memory không plateau. Không âm thầm tăng mem_limit/model memory/pool.

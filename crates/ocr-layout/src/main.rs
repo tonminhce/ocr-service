@@ -20,6 +20,7 @@ fn main() -> Result<()> {
     let mut sha = None;
     let mut tensor_output = None;
     let mut max_pixels = 40_000_000_u64;
+    let mut cpu_arena_enabled = true;
     while let Some(flag) = args.next() {
         let value = args.next().context("expected a flag value")?;
         match flag.as_str() {
@@ -29,6 +30,7 @@ fn main() -> Result<()> {
             "--sha256" => sha = Some(value),
             "--tensor-output" => tensor_output = Some(PathBuf::from(value)),
             "--max-pixels" => max_pixels = value.parse()?,
+            "--cpu-arena" => cpu_arena_enabled = parse_cpu_arena_policy(&value)?,
             _ => bail!("unknown detector flag"),
         }
     }
@@ -46,7 +48,7 @@ fn main() -> Result<()> {
             std::fs::write(path, preprocessing::resize_rgb(&page).as_raw())?;
             return Ok(());
         }
-        let mut detector = load_detector(model, sha.as_deref())?;
+        let mut detector = load_detector(model, sha.as_deref(), cpu_arena_enabled)?;
         let output = detector.detect(&page)?;
         println!("{}", serde_json::to_string(&output)?);
         return Ok(());
@@ -57,7 +59,7 @@ fn main() -> Result<()> {
     );
     let directory = directory.expect("checked input mode").canonicalize()?;
     ensure!(directory.is_dir(), "scratch path is not a directory");
-    let mut detector = load_detector(model, sha.as_deref())?;
+    let mut detector = load_detector(model, sha.as_deref(), cpu_arena_enabled)?;
     let mut output = io::stdout().lock();
     write_response(
         &mut output,
@@ -96,13 +98,26 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-fn load_detector(model: Option<PathBuf>, sha: Option<&str>) -> Result<Detector> {
+fn load_detector(
+    model: Option<PathBuf>,
+    sha: Option<&str>,
+    cpu_arena_enabled: bool,
+) -> Result<Detector> {
     let runtime = env::var("ORT_DYLIB_PATH").context("ORT_DYLIB_PATH is required")?;
     ort::init_from(runtime)?.commit();
-    Detector::load(
+    Detector::load_with_cpu_arena(
         &model.context("--model is required")?,
         sha.context("--sha256 is required")?,
+        cpu_arena_enabled,
     )
+}
+
+fn parse_cpu_arena_policy(value: &str) -> Result<bool> {
+    match value {
+        "on" => Ok(true),
+        "off" => Ok(false),
+        _ => bail!("--cpu-arena must be on or off"),
+    }
 }
 
 fn read_request_page(root: &Path, request: &DetectRequest, max_pixels: u64) -> Result<RgbImage> {
@@ -183,6 +198,13 @@ fn write_response(output: &mut impl Write, response: &Response) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cpu_arena_policy_is_explicit_and_rejects_unknown_values() {
+        assert!(parse_cpu_arena_policy("on").unwrap());
+        assert!(!parse_cpu_arena_policy("off").unwrap());
+        assert!(parse_cpu_arena_policy("auto").is_err());
+    }
 
     #[test]
     fn server_reads_only_its_scratch_image_and_removes_it_after_decode() {

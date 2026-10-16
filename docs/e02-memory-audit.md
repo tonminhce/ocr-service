@@ -1,10 +1,11 @@
 # E02 — Measured memory owner, allocation audit and observer
 
-Audit date: 2026-10-15, local Mac/Docker deployment. Status: **READ-ONLY AUDIT +
-OBSERVER VERIFIED**. Allocator A/B, complete workload envelope, developer corpus,
+Audit date: 2026-10-15; read-only follow-up: 2026-10-16, local Mac/Docker deployment.
+Status: **READ-ONLY AUDIT + OBSERVER VERIFIED; A/B MODE PREPARED, RUN BLOCKED BY
+CURRENT HEADROOM**. Allocator A/B, complete workload envelope, developer corpus,
 quality parity after optimization, and capacity certification remain unproven.
 No model/load was started, no runtime/Compose setting was changed, and no peak was
-reset during this audit. The existing worker has a 2 GiB limit.
+reset. The existing worker has a 2 GiB limit.
 
 ## 1. What the current measurements establish
 
@@ -175,6 +176,29 @@ zero optional-unavailable observations and zero memory-event deltas. The lifetim
 peak was unchanged. Both cgroup and host observation completed without running
 OCR. This remains an observer check.
 
+## 2a. 2026-10-16 headroom hold
+
+A fresh read-only snapshot was taken before any allocator experiment. The live
+worker cgroup was at 1,721,282,560 bytes current, 1,876,815,872 bytes lifetime
+peak, 2,147,483,648 bytes maximum, zero `memory.events` counters, and zero cgroup
+swap. Host swap was 12,992.25 MiB used of 14,336 MiB, with 1,343.75 MiB free;
+`memory_pressure -Q` reported 27% system-wide free. The live worker container was
+not changed and no ONNX session was started.
+
+The one-off `layout-detect` binary now accepts `--cpu-arena on|off`. Omitting the
+flag leaves the original `Session::builder()` defaults untouched; `off` explicitly
+registers the CPU execution provider with its arena disabled. The worker's normal
+helper launch does not pass this flag, so deployment behavior remains arena-on.
+The option is only an experiment control, not a promoted runtime setting.
+
+The A/B run was deliberately not started: a fresh ONNX process would add material
+memory pressure while the host has only about 1.31 GiB swap free and the live
+worker is already near its cgroup peak. The switch has compile/unit coverage, but
+there are no arena-off measurements, output-parity results, or performance claims.
+Rerun only after headroom is available, one fresh cgroup at a time, using the
+baseline and off mode with the same pinned model, inputs, threads, and serialized
+outputs. Stop on swap growth, memory events, or non-plateau behavior.
+
 ## 3. Simultaneous live buffers and hidden bounds
 
 | Path | Allocations/lifetime that matter | Implication |
@@ -197,11 +221,11 @@ invariants must remain intact during optimization.
 
 ## 4. Next experiment and promotion criteria
 
-1. Add a default-preserving explicit layout CPU allocator policy. The installed
-   `ort 2.0.0-rc.11` exposes
-   `ort::ep::CPU::default().with_arena_allocator(false).build()` via
-   `SessionBuilder::with_execution_providers`. Test arena-on/pattern-on versus
-   arena-off/pattern-on first, one fresh isolated cgroup at a time. Fixed
+1. The default-preserving CPU arena experiment switch is implemented in
+  `layout-detect --cpu-arena on|off`. The installed `ort 2.0.0-rc.11` exposes
+  `ort::ep::CPU::default().with_arena_allocator(false).build()` via
+  `SessionBuilder::with_execution_providers`. Test arena-on/pattern-on versus
+  arena-off/pattern-on first, one fresh isolated cgroup at a time. Fixed
    1×3×800×800 input makes memory patterns potentially useful; do not disable two
    independent optimizations in one un-attributable experiment.
 2. If needed test pattern-off separately. Arena-off can lower idle retention
