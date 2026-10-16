@@ -2,6 +2,8 @@
 
 Date: 2026-10-15. Status: **implemented and verified in isolated synthetic environments**. No live OCR container, live database, live Redis, model endpoint, credential, or retained user document was changed. This is not a production promotion, penetration test, quality certification, or capacity acceptance.
 
+Update2026-10-16: [Copilot continuation trace](session-resume-2026-10-16.md) supersedes historical verification counts below. Native workspace275ordinary +90explicit integration passed; Linux parser target113passed and backup binary17passed. The newer packaged smoke exercises course-layout/crop/extraction with12s synthetic model responses, outage gating and restart recovery. This still does not run a real layout/VLM model or prove capacity.
+
 ## Scope and change map
 
 A06b moves PDF inspection/rendering, PDF native-text extraction, and compressed-image decoding out of the worker process into a persistent Rust parser container. A versioned bounded Unix-socket protocol carries document bytes and typed operations; the worker validates every returned RGB frame and native-text record and has no local decode fallback. The existing course render/crop/order/format pipeline and public output schema remain unchanged.
@@ -55,7 +57,7 @@ New regression tests:
 - `Busy` admission returns a retryable error at its budget and succeeds once a slot frees.
 - Canonical messages and retry classes round-trip, and a permanent per-page error leaves the session usable.
 
-The synthetic smoke evidence above predates v2. Packaged slow-model evidence is recorded in the production execution plan.
+The synthetic evidence above predates v2. Copilot's first delayed packaged smoke still used full-page mode. The2026-10-16 continuation adds actual course-layout orchestration using an explicitly synthetic Rust detector and model; see its separate trace rather than treating the earlier full-page run as course-layout proof.
 
 ## O01 observer trace
 
@@ -73,7 +75,7 @@ Verification:
 
 O01 does not yet expose PostgreSQL pool saturation, Redis eviction rate, host CPU/RSS, or model-server health. No alert thresholds/routing are selected. The original "last progress" gauge measured `jobs.updated_at`, which lease heartbeats also update, so it showed liveness rather than OCR progress. A follow-up renamed it to `seconds_since_last_lease_update`, added `oldest_eligible_seconds` and `database_bytes`, and moved the 3-second limit to a server-side `statement_timeout`.
 
-## Final gates and remaining review
+## Historical v1 verification and remaining review
 
 - `cargo fmt --all -- --check`: passed.
 - `cargo clippy --workspace --all-targets --locked -- -D warnings`: passed.

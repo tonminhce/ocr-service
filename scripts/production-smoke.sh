@@ -82,6 +82,21 @@ expect_latest() {
   fi
   echo "latest job: $actual"
 }
+wait_latest() {
+  local deadline=$((SECONDS + 60))
+  while (( SECONDS < deadline )); do
+    if [[ "$(latest_job)" == "$1" ]]; then
+      return 0
+    fi
+    if [[ -n "$pending" ]] && ! kill -0 "$pending" 2>/dev/null; then
+      echo "Client stopped before expected job state '$1'" >&2
+      return 1
+    fi
+    sleep 1
+  done
+  echo "Timed out waiting for job state '$1'" >&2
+  return 1
+}
 client() { # output-name profile expected-pages
   docker run --rm --network "${project}_default" --user 10001:10001 --read-only \
     --tmpfs /tmp:size=16m,mode=1777 \
@@ -115,6 +130,7 @@ step "2/3 parser stopped: claims pause without spending attempts"
 "${compose[@]}" stop parser
 client parser-outage none 2 &
 pending=$!
+wait_latest "queued 0"
 sleep 15
 expect_latest "queued 0"
 "${compose[@]}" start parser
@@ -125,7 +141,7 @@ expect_latest "succeeded 1"
 step "3/3 parser restarted during a job: one attempt lost, retry succeeds"
 client parser-restart none 2 &
 pending=$!
-sleep 4
+wait_latest "processing 1"
 "${compose[@]}" restart parser
 wait "$pending"
 pending=

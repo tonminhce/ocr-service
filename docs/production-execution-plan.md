@@ -1,6 +1,6 @@
 # Kế hoạch thực thi chi tiết: Rust OCR production và capacity
 
-Ngày 15/10/2026 — **M1 verified local; A03/A04 verified isolated; A05 logical restore verified local; A06a subprocess verified Mac/Linux; A06b parser isolation + O01 bounded observer verified isolated; production adoption và các gate chất lượng/năng lực còn riêng**.
+Ngày 16/10/2026 — **M1 verified local; A03–A06/O01 verified trong phạm vi cô lập; continuation đã kiểm course-layout slow-model smoke và local rollback; O02 hosted/provenance, production adoption và quality/capacity còn gate riêng**. Xem [trace tiếp nối Copilot](session-resume-2026-10-16.md).
 
 Tài liệu chuyển [roadmap nghiên cứu](production-next-roadmap.md) thành các gói thực thi có phụ thuộc, code liên quan, kiểm thử và điều kiện phát hành. Đợt đầu P00/A01/A02/B01/B02/E01 có kết quả trong [M1 execution review](m1-execution-review.md). A03 và A04 đã kiểm trên DB/volumes mới trong [A03 execution trace](a03-execution-trace.md) và [A04 execution trace](a04-execution-trace.md); [E02 memory audit](e02-memory-audit.md) đã xác định retained process và kiểm observer. Live M1 chưa cut over; retention apply, đổi model và concurrency sweep chưa thực hiện. Những gói không được đánh dấu thực thi bên dưới vẫn là kế hoạch.
 
@@ -16,10 +16,11 @@ Tài liệu chuyển [roadmap nghiên cứu](production-next-roadmap.md) thành 
 | A04 | IMPLEMENTED / VERIFIED ISOLATED: 209 ordinary +78 explicit integration tests toàn workspace; 11 retention race/guard tests và packaged Docker hold→completion→release qua. [Trace](a04-execution-trace.md). Policy/apply/live cutover vẫn chưa thực hiện |
 | A05 | IMPLEMENTED / VERIFIED LOCAL ISOLATED: Rust PG18/age tooling, 227 ordinary +86 explicit integration; Linux17 binary tests; two full restores and empty-Redis worker recovery. [Trace](a05-execution-trace.md). Off-host/PITR/RPO/RTO/deletion reconciliation/live activation remain gated |
 | A06a | IMPLEMENTED / VERIFIED:240 ordinary +86 explicit integration trên Mac;86 Linux ARM64 release tests. [Trace](a06a-execution-trace.md). Env/commands/process-group/scratch/shutdown hygiene; chưa phải parser sandbox |
-| A06b | IMPLEMENTED / VERIFIED ISOLATED: versioned Unix IPC, parser-only Poppler/decode container, synthetic parity, egress/resource/socket checks, ENOSPC/OOM/restart/recovery. [Trace](a06b-execution-trace.md). Không phải penetration test hoặc production cutover |
+| A06b | IMPLEMENTED / VERIFIED ISOLATED: protocolv2/idle deadline, independent health/admission, parser-only Poppler/decode, synthetic parity, resource/socket checks, ENOSPC/OOM/recovery. Network mode inspected; broader active-egress testing remains. [Trace](a06b-execution-trace.md), [continuation](session-resume-2026-10-16.md). Không phải penetration test hoặc production cutover |
 | O01 | IMPLEMENTED / VERIFIED ISOLATED: cached 30-second PostgreSQL/Redis snapshots with bounded query budget, fixed non-PII gauges, freshness/error. [Trace](a06b-execution-trace.md), [metrics contract](observability.md). Alert thresholds, pool/storage/model health and production dashboards remain open |
 | E03 | IMPLEMENTED / VERIFIED FAKE HTTP: fixed/seeded-Poisson arrivals with finite duration/jobs/bytes/pending caps, unique occurrence idempotency, overload/byte/rejection accounting and scheduler lag. [Trace](e03-execution-trace.md). Real arrival-rate capacity evidence remains gated |
-| O02/C/D/E04/F/G | PLANNED or WAITING_FOR_DATA; independent labels, calibrated acceptance, release/rollback, alert policy and measured capacity remain gated |
+| O02 | TOOLING + LOCAL SYNTHETIC ROLLBACK VERIFIED; Linux verification targets, image builds/audit/SBOM, commit tags and candidate digest inventory configured. [Runbook](release-operations.md). Three hosted CI successes, registry/provenance/model/config approval remain open; no push or production activation |
+| C/D/E04/F/G | PLANNED or WAITING_FOR_DATA; independent labels, calibrated acceptance, alert policy and measured capacity remain gated |
 
 ## 1. Mục tiêu và ràng buộc đã chốt
 
@@ -51,7 +52,7 @@ Sizing tham chiếu: PDF bốn trang hiện mất 178,43 s; 1.000 file tương t
 ## 3. Những bất biến phải giữ qua mọi gói
 
 1. Idempotency, transactional outbox, Redis replay, heartbeat và SQL lease fencing giữ đúng hành vi hiện có. Timeout sau commit có thể là kết quả chưa rõ với caller; retry cùng key phải lấy lại đúng job.
-2. Không sửa migrations đã phát hành `0001`–`0005`; thêm migration mới có forward/rollback compatibility plan.
+2. Không sửa migrations đã phát hành `0001`–`0006`; thêm migration mới có forward/rollback compatibility plan.
 3. Client cũ giữ schema/status code/Location của submit và full-job GET; endpoint/profile/version mới phải opt-in khi thay semantics.
 4. Recovery-only candidate không tự thành found; conflict không tự chọn nguồn; hash/span hợp lệ không được mô tả thành bằng chứng OCR đúng pixels.
 5. Giữ party/document/source scope; cùng giá trị nhưng sai người hoặc sai card vẫn là lỗi.
@@ -146,7 +147,7 @@ completion đã qua tests. Policy không tự suy từ `RETENTION_DAYS`; apply l
 - **O01 implemented:** `ocr-core/src/metrics.rs`, `ocr-core/src/store.rs`, and worker `queue.rs`/`observer.rs` feed the existing protected exporter. A worker-only background snapshot runs every 30 seconds; one PostgreSQL aggregate query is capped at 3 seconds and PostgreSQL/Redis collection has a 5-second total budget. Request handlers and scrapes read only cached fixed-cardinality gauges.
 - **Current signals:** queued/processing/recent-failed counts, eligible/delayed counts, oldest queued age, age since latest processing update, claimable due-outbox count/age, expired leases, Redis PEL count and Redis-reported used memory. Last-success timestamp and boolean collector-error gauge expose freshness/failure without arbitrary labels. API metrics remain process-only; O01 snapshot series are enabled only by the worker collector.
 - **Verified:** fixed-label/last-good-cache unit coverage plus real disposable PostgreSQL and Redis snapshot tests. Collector failure/staleness is represented; alert routing and threshold calibration are not established. PostgreSQL pool/storage, model-server health and host capacity are not yet exported.
-- **O02 remaining:** immutable release digests/provenance/SBOM scans, alert policy, migration compatibility and rollback rehearsal. No release or production cutover is implied by O01.
+- **O02 progress:** [release tooling](release-operations.md), local same-schema N→N+1→N drill and packaged course-layout/extraction with12s mock model responses. Three successful hosted CI runs, verified registry provenance/model/runtime config and migration-crossing rollback remain unproven. Alerting and production cutover are not implied.
 
 ## 7. Luồng B/F00 — Annotation và evaluator trước lựa chọn model
 
