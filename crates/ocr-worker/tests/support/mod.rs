@@ -31,8 +31,13 @@ pub mod parser {
             let service_scratch = scratch_directory.clone();
             let service_shutdown = shutdown.clone();
             let mut task = tokio::spawn(async move {
-                ocr_worker::parser_service::serve(&service_path, &service_scratch, service_shutdown)
-                    .await
+                ocr_worker::parser_service::serve(
+                    &service_path,
+                    &service_scratch,
+                    ocr_worker::parser_service::ServiceLimits::default(),
+                    service_shutdown,
+                )
+                .await
             });
             timeout(Duration::from_secs(2), async {
                 while !socket_path.exists() {

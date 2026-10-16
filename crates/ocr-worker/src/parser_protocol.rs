@@ -2,12 +2,15 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
+use crate::ProcessingError;
+
 const MAGIC: &[u8; 4] = b"OCRP";
 const HEADER_BYTES: usize = 20;
 const METADATA_LIMIT: usize = 64 * 1024;
 pub const REQUEST_DATA_LIMIT: u64 = 64 * 1024 * 1024;
 pub const RESPONSE_DATA_LIMIT: u64 = 128 * 1024 * 1024;
-pub const PROTOCOL_VERSION: u16 = 1;
+pub const PROTOCOL_VERSION: u16 = 2;
+pub const MAX_SESSION_TIMEOUT_SECONDS: u64 = 86_400;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FrameKind {
@@ -37,7 +40,11 @@ pub enum ProtocolError {
 #[serde(tag = "operation", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Operation {
     HealthCheck,
-    HealthReady,
+    HealthReady {
+        max_sessions: u32,
+        active_sessions: u32,
+    },
+    /// Admission only; the document follows in `Upload` after `Admitted`.
     Open {
         media_type: String,
         max_pages: u32,
@@ -46,7 +53,10 @@ pub enum Operation {
         render_dpi: u32,
         page_max_edge: u32,
         timeout_seconds: u64,
+        session_timeout_seconds: u64,
     },
+    Admitted,
+    Upload,
     PageInfo {
         page: u32,
     },
@@ -84,16 +94,114 @@ pub enum RenderProfile {
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ErrorCode {
-    InvalidDocument,
-    UnsupportedMediaType,
-    PageLimitExceeded { actual: u32, limit: u32 },
-    InvalidPage,
-    RenderFailed,
-    DecodeFailed,
-    OutputLimit,
-    Cancelled,
     Busy,
-    Internal,
+    Cancelled,
+    Unavailable,
+    PageLimitExceeded { actual: u32, limit: u32 },
+    ImagePixelLimit { limit: u64 },
+    Rejected { reason: RejectReason },
+}
+
+macro_rules! reject_reasons {
+    ($($variant:ident => $message:literal),+ $(,)?) => {
+        /// Permanent document rejections. Both ends own the text, so a parser
+        /// cannot place arbitrary strings into stored job errors.
+        #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+        #[serde(rename_all = "snake_case")]
+        pub enum RejectReason { $($variant),+ }
+        impl RejectReason {
+            pub const ALL: &'static [Self] = &[$(Self::$variant),+];
+            pub const fn message(self) -> &'static str {
+                match self { $(Self::$variant => $message),+ }
+            }
+        }
+    };
+}
+reject_reasons! {
+    MissingPdfHeader => "input does not have a PDF header",
+    UnsupportedMediaType => "supported media types are PDF, PNG, JPEG, and WebP",
+    UnsupportedImage => "input is not a supported image",
+    ImageMediaMismatch => "image bytes do not match the declared media type",
+    EncryptedPdf => "encrypted PDFs are not supported",
+    InvalidPageCount => "PDF metadata does not contain a valid page count",
+    PdfMetadataEncoding => "PDF metadata is not valid UTF-8",
+    UnprocessablePdf => "Poppler could not process this PDF; it may be corrupt or encrypted",
+    ProcessOutputLimit => "PDF process output exceeded its size limit",
+    ProcessTimeout => "PDF inspection or rendering timed out",
+    InvalidPageSize => "PDF metadata has an invalid page size",
+    InvalidPdfPageNumber => "invalid PDF page number",
+    InvalidRenderParameters => "invalid PDF render parameters",
+    InvalidRenderDimensions => "invalid PDF rendering dimensions",
+    PageRenderLimit => "PDF page exceeds image rendering limits",
+    NativeTextEncoding => "native PDF text is not UTF-8",
+    InvalidNativeXml => "invalid native PDF geometry XML",
+    InvalidNativeNumber => "invalid native PDF geometry number",
+    InvalidNativePage => "invalid native PDF page dimensions",
+    NativeTextBudget => "native PDF text budget exceeded",
+    InvalidImageEncoding => "invalid image encoding",
+    UnsupportedImageFormat => "image format is not PNG, JPEG, or WebP",
+    UnreadableImageDimensions => "cannot read image dimensions",
+    InvalidImageData => "invalid or oversized image data",
+    InvalidImageOrientation => "invalid image orientation metadata",
+    InvalidPageNumber => "invalid document page number",
+    InvalidLimits => "parser operation limits are invalid",
+    ProtocolViolation => "parser request violated the protocol",
+    Unprocessable => "document could not be processed by the isolated parser",
+}
+
+impl ErrorCode {
+    /// Parser side: classify by exact canonical text, never by substring.
+    pub fn from_error(error: &ProcessingError) -> Self {
+        if error.retryable {
+            return if error.message == "job processing cancelled" {
+                Self::Cancelled
+            } else {
+                Self::Unavailable
+            };
+        }
+        if let Some((actual, limit)) = page_limit(&error.message) {
+            return Self::PageLimitExceeded { actual, limit };
+        }
+        if let Some(limit) = pixel_limit(&error.message) {
+            return Self::ImagePixelLimit { limit };
+        }
+        let reason = RejectReason::ALL
+            .iter()
+            .copied()
+            .find(|reason| reason.message() == error.message)
+            .unwrap_or(RejectReason::Unprocessable);
+        Self::Rejected { reason }
+    }
+
+    /// Client side: only these fixed messages and retry classes leave the parser.
+    pub fn into_error(self) -> ProcessingError {
+        match self {
+            Self::Busy => ProcessingError::transient("isolated parser is at capacity"),
+            Self::Cancelled => ProcessingError::transient("job processing cancelled"),
+            Self::Unavailable => ProcessingError::transient("isolated parser is unavailable"),
+            Self::PageLimitExceeded { actual, limit } => {
+                ProcessingError::permanent(format!("PDF has {actual} pages; the limit is {limit}"))
+            }
+            Self::ImagePixelLimit { limit } => {
+                ProcessingError::permanent(format!("image exceeds the {limit} pixel limit"))
+            }
+            Self::Rejected { reason } => ProcessingError::permanent(reason.message()),
+        }
+    }
+}
+
+fn page_limit(message: &str) -> Option<(u32, u32)> {
+    let rest = message.strip_prefix("PDF has ")?;
+    let (actual, limit) = rest.split_once(" pages; the limit is ")?;
+    Some((actual.parse().ok()?, limit.parse().ok()?))
+}
+
+fn pixel_limit(message: &str) -> Option<u64> {
+    message
+        .strip_prefix("image exceeds the ")?
+        .strip_suffix(" pixel limit")?
+        .parse()
+        .ok()
 }
 
 #[derive(Debug, PartialEq)]
@@ -198,12 +306,11 @@ fn validate_payload(
     data_length: u64,
 ) -> Result<(), ProtocolError> {
     let valid = match (kind, operation) {
-        (FrameKind::Request, Operation::Open { .. }) => {
-            (1..=REQUEST_DATA_LIMIT).contains(&data_length)
-        }
+        (FrameKind::Request, Operation::Upload) => (1..=REQUEST_DATA_LIMIT).contains(&data_length),
         (
             FrameKind::Request,
             Operation::HealthCheck
+            | Operation::Open { .. }
             | Operation::PageInfo { .. }
             | Operation::RenderRgb { .. }
             | Operation::NativeText
@@ -212,9 +319,10 @@ fn validate_payload(
         (
             FrameKind::Response,
             Operation::Opened { .. }
+            | Operation::Admitted
             | Operation::PageInfoResult { .. }
             | Operation::Closed
-            | Operation::HealthReady
+            | Operation::HealthReady { .. }
             | Operation::Error { .. },
         ) => data_length == 0,
         (FrameKind::Response, Operation::RgbResult { width, height }) => {
@@ -322,6 +430,74 @@ mod tests {
                 .unwrap_err(),
             ProtocolError::Limit
         );
+    }
+
+    #[test]
+    fn error_codes_round_trip_canonical_messages_and_retry_classes() {
+        for reason in RejectReason::ALL {
+            let error = ProcessingError::permanent(reason.message());
+            let code = ErrorCode::from_error(&error);
+            assert_eq!(code, ErrorCode::Rejected { reason: *reason });
+            let restored = code.into_error();
+            assert_eq!(restored.message, reason.message());
+            assert!(!restored.retryable);
+        }
+        let page = ProcessingError::permanent("PDF has 31 pages; the limit is 20");
+        assert_eq!(
+            ErrorCode::from_error(&page).into_error().message,
+            page.message
+        );
+        let pixels = ProcessingError::permanent("image exceeds the 4000 pixel limit");
+        assert_eq!(
+            ErrorCode::from_error(&pixels).into_error().message,
+            pixels.message
+        );
+
+        let unknown = ErrorCode::from_error(&ProcessingError::permanent("novel failure"));
+        assert_eq!(
+            unknown,
+            ErrorCode::Rejected {
+                reason: RejectReason::Unprocessable
+            }
+        );
+        assert!(!unknown.into_error().retryable);
+        let transient = ErrorCode::from_error(&ProcessingError::transient("disk busy"));
+        assert_eq!(transient, ErrorCode::Unavailable);
+        assert!(transient.into_error().retryable);
+        let cancelled =
+            ErrorCode::from_error(&ProcessingError::transient("job processing cancelled"));
+        assert_eq!(cancelled, ErrorCode::Cancelled);
+        assert!(ErrorCode::Busy.into_error().retryable);
+    }
+
+    #[tokio::test]
+    async fn open_carries_no_document_and_upload_requires_one() {
+        let open = Frame {
+            operation: Operation::Open {
+                media_type: "application/pdf".into(),
+                max_pages: 1,
+                max_pixels: 1,
+                max_image_edge: 32,
+                render_dpi: 72,
+                page_max_edge: 32,
+                timeout_seconds: 1,
+                session_timeout_seconds: 1,
+            },
+            data: vec![1],
+        };
+        let upload = Frame {
+            operation: Operation::Upload,
+            data: Vec::new(),
+        };
+        let (mut writer, _reader) = duplex(128);
+        for frame in [open, upload] {
+            assert_eq!(
+                write_frame(&mut writer, FrameKind::Request, &frame, 32)
+                    .await
+                    .unwrap_err(),
+                ProtocolError::Limit
+            );
+        }
     }
 
     #[tokio::test]

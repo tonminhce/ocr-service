@@ -136,14 +136,15 @@ impl Recognizer {
             "region_concurrency":self.settings.region_concurrency,
             "layout_pool_size":self.settings.layout_pool_size,
             "document_process_policy": {
-                "revision":"isolated-parser-ipc-v1",
+                "revision":"isolated-parser-ipc-v2",
                 "parser": {
-                    "protocol_version":1,
+                    "protocol_version":crate::parser_protocol::PROTOCOL_VERSION,
                     "transport":"bounded_unix_socket",
                     "execution_boundary":"parser_container_required",
                     "isolation_attestation":"not_attested_by_worker",
                     "fails_closed_when_unavailable":true,
-                    "max_sessions_per_container":2,
+                    "max_sessions_per_container":"operator_configured_unverified",
+                    "session_deadline":"job_timeout_plus_grace",
                     "decode_slots_per_container":1,
                     "request_data_limit_bytes":67108864,
                     "response_data_limit_bytes":134217728,

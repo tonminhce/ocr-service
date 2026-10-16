@@ -15,11 +15,24 @@ async fn main() -> anyhow::Result<()> {
         .init();
     let _ = process_metrics();
     let settings = Settings::from_env()?;
-    ocr_worker::parser_client::health_check(
+    let parser = ocr_worker::parser_client::health_check(
         &settings.parser_socket_path,
         std::time::Duration::from_secs(2),
     )
     .await?;
+    // More local jobs than parser sessions would turn normal load into Busy
+    // retries, so the deployment must size the parser for this worker.
+    if settings.worker_concurrency > parser.max_sessions as usize {
+        anyhow::bail!(
+            "WORKER_CONCURRENCY {} exceeds isolated parser capacity {}",
+            settings.worker_concurrency,
+            parser.max_sessions
+        );
+    }
+    tracing::info!(
+        parser_max_sessions = parser.max_sessions,
+        "isolated parser ready"
+    );
     let store = Store::connect(&settings.database_url).await?;
     store.check_schema().await?;
     store.health().await?;

@@ -6,7 +6,7 @@ use sha2::{Digest, Sha256};
 use tokio::{
     net::UnixStream,
     sync::{Mutex, MutexGuard},
-    time::timeout,
+    time::{Instant, timeout},
 };
 use tokio_util::sync::CancellationToken;
 
@@ -20,6 +20,8 @@ use crate::{
 };
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
+const ADMISSION_BACKOFF_START: Duration = Duration::from_millis(100);
+const ADMISSION_BACKOFF_MAX: Duration = Duration::from_secs(1);
 const NATIVE_BLOCKS_LIMIT: usize = 10_000;
 const NATIVE_TEXT_LIMIT: usize = 4 * 1024 * 1024;
 
@@ -41,6 +43,14 @@ pub struct ParserLimits {
     pub render_dpi: u32,
     pub page_max_edge: u32,
     pub timeout_seconds: u64,
+    /// Upper bound for the whole session; the parser closes it afterwards.
+    pub session_timeout_seconds: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ParserCapacity {
+    pub max_sessions: u32,
+    pub active_sessions: u32,
 }
 
 impl Default for ParserLimits {
@@ -52,6 +62,7 @@ impl Default for ParserLimits {
             render_dpi: 200,
             page_max_edge: 3500,
             timeout_seconds: 30,
+            session_timeout_seconds: 600,
         }
     }
 }
@@ -65,6 +76,7 @@ impl From<&Settings> for ParserLimits {
             render_dpi: settings.pdf_render_dpi,
             page_max_edge: settings.page_max_edge,
             timeout_seconds: settings.pdf_render_timeout_seconds,
+            session_timeout_seconds: settings.job_timeout_seconds,
         }
     }
 }
@@ -83,7 +95,6 @@ impl ParserSession {
             ));
         }
         let source_sha256 = format!("{:x}", Sha256::digest(&input));
-        let mut stream = connect(socket_path, CONNECT_TIMEOUT, &cancelled).await?;
         let timeout = Duration::from_secs(limits.timeout_seconds);
         let operation = Operation::Open {
             media_type: media_type.to_owned(),
@@ -93,16 +104,19 @@ impl ParserSession {
             render_dpi: limits.render_dpi,
             page_max_edge: limits.page_max_edge,
             timeout_seconds: limits.timeout_seconds,
+            session_timeout_seconds: limits.session_timeout_seconds,
         };
+        let mut stream = admit(socket_path, operation, timeout, &cancelled).await?;
         let frame = exchange(
             &mut stream,
-            operation,
+            Operation::Upload,
             input,
             timeout,
             &cancelled,
             REQUEST_DATA_LIMIT,
         )
-        .await?;
+        .await
+        .and_then(operation_result)?;
         let Operation::Opened { pages } = frame.operation else {
             return Err(unexpected_response());
         };
@@ -261,7 +275,10 @@ impl ParserSession {
     }
 }
 
-pub async fn health_check(socket_path: &Path, budget: Duration) -> Result<(), ProcessingError> {
+pub async fn health_check(
+    socket_path: &Path,
+    budget: Duration,
+) -> Result<ParserCapacity, ProcessingError> {
     let cancelled = CancellationToken::new();
     let mut stream = connect(socket_path, budget, &cancelled).await?;
     let frame = exchange(
@@ -272,11 +289,60 @@ pub async fn health_check(socket_path: &Path, budget: Duration) -> Result<(), Pr
         &cancelled,
         REQUEST_DATA_LIMIT,
     )
-    .await?;
-    if frame.operation == Operation::HealthReady && frame.data.is_empty() {
-        Ok(())
-    } else {
-        Err(unexpected_response())
+    .await
+    .and_then(operation_result)?;
+    match frame.operation {
+        Operation::HealthReady {
+            max_sessions,
+            active_sessions,
+        } if max_sessions > 0 && active_sessions <= max_sessions => Ok(ParserCapacity {
+            max_sessions,
+            active_sessions,
+        }),
+        _ => Err(unexpected_response()),
+    }
+}
+
+/// Busy is the parser's normal backpressure, so admission waits within the
+/// operation budget instead of turning a full parser into a failed attempt.
+async fn admit(
+    socket_path: &Path,
+    operation: Operation,
+    budget: Duration,
+    cancelled: &CancellationToken,
+) -> Result<UnixStream, ProcessingError> {
+    let deadline = Instant::now() + budget;
+    let mut backoff = ADMISSION_BACKOFF_START;
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        let mut stream = connect(socket_path, remaining, cancelled).await?;
+        let frame = exchange(
+            &mut stream,
+            operation.clone(),
+            Vec::new(),
+            remaining,
+            cancelled,
+            REQUEST_DATA_LIMIT,
+        )
+        .await?;
+        match frame.operation {
+            Operation::Admitted if frame.data.is_empty() => return Ok(stream),
+            Operation::Error {
+                code: ErrorCode::Busy,
+            } if Instant::now() + backoff < deadline => {
+                drop(stream);
+                tokio::select! {
+                    biased;
+                    _ = cancelled.cancelled() => return Err(ProcessingError::transient("job processing cancelled")),
+                    _ = tokio::time::sleep(backoff) => {}
+                }
+                backoff = (backoff * 2).min(ADMISSION_BACKOFF_MAX);
+            }
+            _ => {
+                operation_result(frame)?;
+                return Err(unexpected_response());
+            }
+        }
     }
 }
 
@@ -313,15 +379,14 @@ async fn exchange(
             .await
             .map_err(protocol_error)
     };
-    let frame = tokio::select! {
+    tokio::select! {
         biased;
-        _ = cancelled.cancelled() => return Err(ProcessingError::transient("job processing cancelled")),
+        _ = cancelled.cancelled() => Err(ProcessingError::transient("job processing cancelled")),
         result = timeout(budget, exchange) => match result {
-            Ok(result) => result?,
-            Err(_) => return Err(ProcessingError::transient("isolated parser operation timed out")),
+            Ok(result) => result,
+            Err(_) => Err(ProcessingError::transient("isolated parser operation timed out")),
         }
-    };
-    operation_result(frame)
+    }
 }
 
 async fn lock_stream<'a>(
@@ -339,24 +404,7 @@ async fn lock_stream<'a>(
 
 fn operation_result(frame: Frame) -> Result<Frame, ProcessingError> {
     if let Operation::Error { code } = frame.operation {
-        return Err(match code {
-            ErrorCode::InvalidDocument => ProcessingError::permanent("invalid document input"),
-            ErrorCode::UnsupportedMediaType => {
-                ProcessingError::permanent("unsupported document media type")
-            }
-            ErrorCode::PageLimitExceeded { actual, limit } => {
-                ProcessingError::permanent(format!("PDF has {actual} pages; the limit is {limit}"))
-            }
-            ErrorCode::InvalidPage => ProcessingError::permanent("invalid document page number"),
-            ErrorCode::OutputLimit => {
-                ProcessingError::permanent("document parser output limit exceeded")
-            }
-            ErrorCode::Cancelled => ProcessingError::transient("job processing cancelled"),
-            ErrorCode::RenderFailed => ProcessingError::permanent("document rendering failed"),
-            ErrorCode::DecodeFailed => ProcessingError::permanent("image decoding failed"),
-            ErrorCode::Busy => ProcessingError::transient("isolated parser is at capacity"),
-            ErrorCode::Internal => parser_unavailable(),
-        });
+        return Err(code.into_error());
     }
     if !frame.data.is_empty()
         && !matches!(
@@ -413,6 +461,21 @@ mod tests {
                 &mut stream,
                 FrameKind::Response,
                 &Frame {
+                    operation: Operation::Admitted,
+                    data: Vec::new(),
+                },
+                RESPONSE_DATA_LIMIT,
+            )
+            .await
+            .unwrap();
+            let upload = read_frame(&mut stream, FrameKind::Request, REQUEST_DATA_LIMIT)
+                .await
+                .unwrap();
+            assert_eq!(upload.operation, Operation::Upload);
+            write_frame(
+                &mut stream,
+                FrameKind::Response,
+                &Frame {
                     operation: Operation::Opened { pages: 1 },
                     data: Vec::new(),
                 },
@@ -440,6 +503,7 @@ mod tests {
             render_dpi: 144,
             page_max_edge: 40,
             timeout_seconds: 3,
+            session_timeout_seconds: 30,
         };
         let session = ParserSession::open(
             &socket_path,

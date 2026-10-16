@@ -12,9 +12,9 @@ Relevant implementation: `crates/ocr-worker/src/parser_protocol.rs`, `parser_cli
 
 ## A06b boundary and invariants
 
-1. IPC uses `OCRP`, protocol v1, a 20-byte frame header, metadata capped at 64 KiB, request data capped at 64 MiB, and response data capped at 128 MiB. The protocol accepts typed operations only; no caller-supplied filesystem path or executable argument crosses the boundary.
-2. A parser container allows at most two active sessions and one decode slot. Per-frame deadlines are bounded. RGB payloads must have exactly checked `width * height * 3` bytes; client-side pixel/edge bounds and native evidence source/page/ID/geometry are revalidated.
-3. The parser runs as UID 10002/GID 10001, `network_mode: none`, read-only root, no-new-privileges, all capabilities dropped, init enabled, 2 CPUs, 2 GiB memory, 4 GiB memory+swap, 64 PIDs, and a 512 MiB `/scratch` tmpfs. Docker inspection of the final disposable container confirmed those settings and `healthy` state. Its only persistent mount is the parser socket volume.
+1. IPC uses `OCRP`, a 20-byte frame header, metadata capped at 64 KiB, request data capped at 64 MiB, and response data capped at 128 MiB. The protocol accepts typed operations only; no caller-supplied filesystem path or executable argument crosses the boundary. The original v1 is superseded by v2; see the post-review correction below.
+2. Session capacity is configurable (`OCR_PARSER_MAX_SESSIONS`, default 8; v1 had a fixed two) with one decode slot. RGB payloads must have exactly checked `width * height * 3` bytes; client-side pixel/edge bounds and native evidence source/page/ID/geometry are revalidated.
+3. The parser runs as UID 10002/GID 10001, `network_mode: none`, read-only root, no-new-privileges, all capabilities dropped, init enabled, 2 CPUs, 2 GiB memory, 4 GiB memory+swap, 64 PIDs, and a `/scratch` tmpfs (512 MiB when verified below; raised to 1 GiB with v2 for the larger session count). Docker inspection of the final disposable container confirmed those settings and `healthy` state. Network isolation was checked by configuration inspection, not by an egress attempt. Its only persistent mount is the parser socket volume.
 4. The socket directory is parser-owned, mode `0710`, group 10001; the socket is `0660`. The worker can traverse/connect but cannot create, remove, or replace the socket. The runtime check printed `socket_dir_not_writable` for the worker identity.
 5. Poppler is present only in the parser image; the app image has no `pdfinfo`. The parser image has no worker executable. Parser health is checked before worker startup and each document requires the parser; unavailable helper errors retry/fail through the existing job policy instead of falling back to worker-local parsing.
 6. The uploaded source digest is computed worker-side before IPC. The helper response is untrusted; exact RGB shape and native-text provenance are checked again before downstream use. Optional native-text failure remains a warning only where the existing contract permits it; retryable parser failures do not become false OCR success.
@@ -22,8 +22,8 @@ Relevant implementation: `crates/ocr-worker/src/parser_protocol.rs`, `parser_cli
 
 ## A06b test and fault trace
 
-- Parser protocol/client/service unit coverage includes malformed, wrong-version, wrong-direction, truncated and oversized frames; invalid RGB dimensions; forged source/geometry; socket permission/staleness; bounded concurrent sessions; disconnect cleanup; PDF page/RGB/native-text parity; and compressed-image pixel parity.
-- The packaged synthetic two-page PDF completed through the isolated production Compose topology. Source SHA-256 was `5d1cf059ad0f473c987717ffac82eefec7699a148be07cf18de85b3cd4ef675c`; output page numbers were `[1,2]`; strategy was `full_page_vlm`; protocol was v1; `fails_closed_when_unavailable=true`.
+- Parser protocol/client/service unit coverage includes malformed, wrong-version, wrong-direction, truncated and oversized frames; invalid RGB dimensions; forged source/geometry; socket permission/staleness; disconnect cleanup; PDF page/RGB/native-text parity; and compressed-image pixel parity. The v1 suite did not exercise concurrent sessions or idle gaps between requests; v2 adds both (below).
+- The packaged synthetic two-page PDF completed through the isolated production Compose topology. Source SHA-256 was `5d1cf059ad0f473c987717ffac82eefec7699a148be07cf18de85b3cd4ef675c`; output page numbers were `[1,2]`; strategy was `full_page_vlm`; protocol was v1; `fails_closed_when_unavailable=true`. The mock model answered instantly, so this run could not reveal the v1 idle-gap defect.
 - The same synthetic two-page job succeeded after parser restart and again after final ARM64 images were rebuilt/recreated. The final packaged output retained the same source digest and page order.
 - Scratch exhaustion used a synthetic 512 MiB `/scratch/fill` file. Each client exited 1 after the existing three-attempt policy; the corresponding jobs were failed, not reported successful. The filler was removed from the disposable tmpfs, and a later two-page job succeeded.
 - Decoder memory pressure used a generated uniform 6,324 x 6,324 RGBA PNG (39,992,976 pixels, 790,618 compressed bytes). Only the disposable parser cgroup was temporarily reduced from 2 GiB/4 GiB to 128 MiB/128 MiB. Docker emitted three `oom` events per run; the parser restarted three times and returned healthy. The OOM test was run both before and after rebuilding the final image. Limits were restored exactly to 2 GiB/4 GiB before a fresh valid job succeeded on the final image. No live worker/app limits were changed.
@@ -31,6 +31,31 @@ Relevant implementation: `crates/ocr-worker/src/parser_protocol.rs`, `parser_cli
 - Final image IDs: parser `sha256:55636bb0c8882dd5e54b1e8f1d31de62312bf166117a2147d64c01d9f26eaba3`; app `sha256:dbae464e2d546e122240438497a8ae7f13275a583f6464b63e192c5f2af60d3c`; both `linux/arm64`.
 
 The final rebuilt parser image was independently health-checked after OOM, restored to its original limits, and ran a fresh two-page success.
+
+## Post-review correction: protocol v2
+
+A later review found that v1 was not usable with real model latency:
+
+- **Idle gap (critical).** v1 applied the 10-second frame deadline to the wait *between* requests. A course-layout or `vi_rental_contract_v1` job calls the parser again after VLM inference (about 45 s/page on the reference Mac), so the parser closed the session and every attempt failed with a retryable IPC error. Reproduced with an 11-second gap.
+- **Health starvation.** Health checks consumed one of the two session permits, so a busy parser could look unhealthy.
+- **Lossy errors.** Substring error mapping replaced canonical document errors with generic text, and turned unknown permanent failures into retries.
+
+v2 (`PROTOCOL_VERSION = 2`) changes:
+
+- `Open` carries limits plus `session_timeout_seconds` (the worker's `JOB_TIMEOUT_SECONDS`) and no data. The parser validates limits, then admits with a non-blocking session permit and returns `Admitted`, or returns `Busy`; the document follows in `Upload`. The client retries `Busy` with 100 ms to 1 s backoff inside the operation budget.
+- Between requests the parser waits for the first byte until the session deadline (open time + session timeout + 60 s grace). Once a request starts, the full frame must arrive within 10 s, so a stalled writer still cannot pin a slot.
+- Connections are bounded at sessions + 4. Health checks never take a session permit and report `max_sessions`/`active_sessions`. The worker refuses to start when `WORKER_CONCURRENCY` exceeds parser capacity.
+- Errors are typed: `Busy`, `Cancelled`, `Unavailable`, page/pixel limits with numbers, and a closed `RejectReason` set. Each `RejectReason` carries the canonical pre-A06b message (for example `input does not have a PDF header`). Unknown permanent failures stay permanent with a fixed generic message. Every rejection writes an error response before closing.
+
+New regression tests:
+
+- An idle gap beyond the frame timeout succeeds until the session deadline, then is refused.
+- A stalled partial frame is closed after one frame timeout.
+- Health reports capacity while all sessions are held.
+- `Busy` admission returns a retryable error at its budget and succeeds once a slot frees.
+- Canonical messages and retry classes round-trip, and a permanent per-page error leaves the session usable.
+
+The synthetic smoke evidence above predates v2. Packaged slow-model evidence is recorded in the production execution plan.
 
 ## O01 observer trace
 

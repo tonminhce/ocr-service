@@ -10,29 +10,76 @@ use image::{ImageFormat, ImageReader, RgbImage};
 use ocr_extraction::SourceBlock;
 use tempfile::TempDir;
 use tokio::{
+    io::AsyncReadExt,
     net::{UnixListener, UnixStream},
     sync::Semaphore,
     task::JoinSet,
-    time::timeout,
+    time::{Instant, timeout, timeout_at},
 };
 use tokio_util::sync::CancellationToken;
 
 use crate::{
     ProcessingError, child_process,
     parser_protocol::{
-        ErrorCode, Frame, FrameKind, Operation, REQUEST_DATA_LIMIT, RESPONSE_DATA_LIMIT,
-        RenderProfile, read_frame, write_frame,
+        ErrorCode, Frame, FrameKind, MAX_SESSION_TIMEOUT_SECONDS, Operation, REQUEST_DATA_LIMIT,
+        RESPONSE_DATA_LIMIT, RejectReason, RenderProfile, read_frame, write_frame,
     },
     preparation,
     subprocess_policy::PdfTool,
 };
 
-const MAX_SESSIONS: usize = 2;
+pub const DEFAULT_MAX_SESSIONS: u32 = 8;
+const MAX_SESSIONS_LIMIT: u32 = 64;
+// Health checks and admission replies must not wait behind document sessions.
+const HANDSHAKE_CONNECTIONS: usize = 4;
 const MAX_NATIVE_JSON_BYTES: usize = 4 * 1024 * 1024;
 const MAX_IMAGE_PIXELS: u64 = 100_000_000;
 const MAX_IMAGE_EDGE: u32 = 8192;
 const MAX_PAGE_COUNT: u32 = 1000;
-const IPC_FRAME_TIMEOUT: Duration = Duration::from_secs(10);
+const IPC_WRITE_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Frame timeout bounds a started request; the session deadline bounds idle
+/// time between requests, which spans model inference in the worker.
+#[derive(Clone, Copy, Debug)]
+pub struct ServiceLimits {
+    pub max_sessions: u32,
+    pub frame_timeout: Duration,
+    pub session_grace: Duration,
+}
+
+impl Default for ServiceLimits {
+    fn default() -> Self {
+        Self {
+            max_sessions: DEFAULT_MAX_SESSIONS,
+            frame_timeout: Duration::from_secs(10),
+            session_grace: Duration::from_secs(60),
+        }
+    }
+}
+
+impl ServiceLimits {
+    pub fn from_env() -> Result<Self, ProcessingError> {
+        let max_sessions = match std::env::var("OCR_PARSER_MAX_SESSIONS") {
+            Ok(value) => value
+                .parse::<u32>()
+                .ok()
+                .filter(|sessions| (1..=MAX_SESSIONS_LIMIT).contains(sessions))
+                .ok_or_else(|| {
+                    ProcessingError::permanent("OCR_PARSER_MAX_SESSIONS must be 1..=64")
+                })?,
+            Err(std::env::VarError::NotPresent) => DEFAULT_MAX_SESSIONS,
+            Err(_) => {
+                return Err(ProcessingError::permanent(
+                    "OCR_PARSER_MAX_SESSIONS must be valid Unicode",
+                ));
+            }
+        };
+        Ok(Self {
+            max_sessions,
+            ..Self::default()
+        })
+    }
+}
 
 #[derive(Clone, Copy)]
 struct RenderLimits {
@@ -54,11 +101,17 @@ struct ParserDocument {
 pub async fn serve(
     socket_path: &Path,
     scratch_root: &Path,
+    limits: ServiceLimits,
     shutdown: CancellationToken,
 ) -> Result<(), ProcessingError> {
     if !socket_path.is_absolute() {
         return Err(ProcessingError::permanent(
             "parser socket path must be absolute",
+        ));
+    }
+    if !(1..=MAX_SESSIONS_LIMIT).contains(&limits.max_sessions) {
+        return Err(ProcessingError::permanent(
+            "parser session capacity must be 1..=64",
         ));
     }
     validate_private_directory(scratch_root, "parser scratch")?;
@@ -72,7 +125,10 @@ pub async fn serve(
         .map_err(|_| ProcessingError::transient("cannot bind isolated parser socket"))?;
     std::fs::set_permissions(socket_path, std::fs::Permissions::from_mode(0o660))
         .map_err(|_| ProcessingError::transient("cannot secure isolated parser socket"))?;
-    let sessions = Arc::new(Semaphore::new(MAX_SESSIONS));
+    let sessions = Arc::new(Semaphore::new(limits.max_sessions as usize));
+    let connections = Arc::new(Semaphore::new(
+        limits.max_sessions as usize + HANDSHAKE_CONNECTIONS,
+    ));
     let mut tasks = JoinSet::new();
 
     loop {
@@ -84,16 +140,18 @@ pub async fn serve(
                     tracing::warn!("isolated parser session task failed");
                 }
             }
-            accepted = listener.accept(), if sessions.available_permits() > 0 => {
+            accepted = listener.accept(), if connections.available_permits() > 0 => {
                 let (stream, _) = accepted
                     .map_err(|_| ProcessingError::transient("parser socket accept failed"))?;
-                let permit = sessions.clone().acquire_owned().await
-                    .map_err(|_| ProcessingError::transient("parser service is stopping"))?;
+                let Ok(connection) = connections.clone().try_acquire_owned() else {
+                    continue;
+                };
                 let stop = shutdown.clone();
                 let scratch_root = scratch_root.to_owned();
+                let sessions = sessions.clone();
                 tasks.spawn(async move {
-                    let _permit = permit;
-                    handle_connection(stream, &scratch_root, stop).await
+                    let _connection = connection;
+                    handle_connection(stream, &scratch_root, sessions, limits, stop).await
                 });
             }
         }
@@ -138,20 +196,26 @@ pub fn scratch_root_from_env() -> Result<PathBuf, ProcessingError> {
 async fn handle_connection(
     mut stream: UnixStream,
     scratch_root: &Path,
+    sessions: Arc<Semaphore>,
+    service: ServiceLimits,
     shutdown: CancellationToken,
 ) -> Result<(), ProcessingError> {
-    let open_frame = tokio::select! {
-        biased;
-        _ = shutdown.cancelled() => return Err(ProcessingError::transient("parser service is stopping")),
-        result = timeout(IPC_FRAME_TIMEOUT, read_frame(&mut stream, FrameKind::Request, REQUEST_DATA_LIMIT)) => {
-            result.map_err(|_| ProcessingError::transient("parser IPC frame timed out"))?
-                .map_err(|_| ProcessingError::permanent("invalid parser IPC open frame"))?
-        }
-    };
-    match open_frame.operation {
-        Operation::HealthCheck if open_frame.data.is_empty() => {
-            write_response(&mut stream, Operation::HealthReady, Vec::new()).await?;
-            Ok(())
+    let handshake = Instant::now() + service.frame_timeout;
+    let first = read_request(&mut stream, handshake, service.frame_timeout, &shutdown).await?;
+    match first.operation {
+        Operation::HealthCheck => {
+            let active = service
+                .max_sessions
+                .saturating_sub(sessions.available_permits() as u32);
+            write_response(
+                &mut stream,
+                Operation::HealthReady {
+                    max_sessions: service.max_sessions,
+                    active_sessions: active,
+                },
+                Vec::new(),
+            )
+            .await
         }
         Operation::Open {
             media_type,
@@ -161,32 +225,56 @@ async fn handle_connection(
             render_dpi,
             page_max_edge,
             timeout_seconds,
+            session_timeout_seconds,
         } => {
-            let limits = validate_limits(
+            let limits = match validate_limits(
                 max_pages,
                 max_pixels,
                 max_image_edge,
                 render_dpi,
                 page_max_edge,
                 timeout_seconds,
-            )?;
+                session_timeout_seconds,
+            ) {
+                Ok(limits) => limits,
+                Err(error) => return reject(&mut stream, error).await,
+            };
+            let Ok(_session) = sessions.try_acquire_owned() else {
+                return write_response(
+                    &mut stream,
+                    Operation::Error {
+                        code: ErrorCode::Busy,
+                    },
+                    Vec::new(),
+                )
+                .await;
+            };
+            let deadline = Instant::now()
+                + Duration::from_secs(session_timeout_seconds)
+                + service.session_grace;
+            write_response(&mut stream, Operation::Admitted, Vec::new()).await?;
+            let upload = read_request(
+                &mut stream,
+                Instant::now() + service.frame_timeout,
+                service.frame_timeout,
+                &shutdown,
+            )
+            .await?;
+            if upload.operation != Operation::Upload {
+                return reject(&mut stream, protocol_violation()).await;
+            }
             let cancelled = CancellationToken::new();
             let open = open_document(
                 scratch_root,
                 &media_type,
-                open_frame.data,
+                upload.data,
                 max_pages,
                 limits,
                 cancelled.clone(),
             );
             let document = match while_connected(&stream, &shutdown, &cancelled, open).await {
                 Ok(document) => document,
-                Err(error) => {
-                    let code = map_error(&error, true);
-                    let _ =
-                        write_response(&mut stream, Operation::Error { code }, Vec::new()).await;
-                    return Err(error);
-                }
+                Err(error) => return reject(&mut stream, error).await,
             };
             write_response(
                 &mut stream,
@@ -196,38 +284,57 @@ async fn handle_connection(
                 Vec::new(),
             )
             .await?;
-            serve_document(&mut stream, document, shutdown).await
+            serve_document(&mut stream, document, deadline, service, shutdown).await
         }
-        _ => {
-            let _ = write_response(
-                &mut stream,
-                Operation::Error {
-                    code: ErrorCode::InvalidDocument,
-                },
-                Vec::new(),
-            )
-            .await;
-            Err(ProcessingError::permanent(
-                "parser session must begin with an open request",
-            ))
-        }
+        _ => reject(&mut stream, protocol_violation()).await,
     }
+}
+
+/// Waits for the next request until the session deadline, then requires the
+/// whole frame within one frame timeout so a stalled writer cannot pin a slot.
+async fn read_request(
+    stream: &mut UnixStream,
+    idle_deadline: Instant,
+    frame_timeout: Duration,
+    shutdown: &CancellationToken,
+) -> Result<Frame, ProcessingError> {
+    let first = tokio::select! {
+        biased;
+        _ = shutdown.cancelled() => return Err(ProcessingError::transient("parser service is stopping")),
+        byte = timeout_at(idle_deadline, stream.read_u8()) => byte
+            .map_err(|_| ProcessingError::transient("parser session deadline elapsed"))?
+            .map_err(|_| ProcessingError::transient("parser session disconnected"))?,
+    };
+    let prefix = [first];
+    let mut reader = (&prefix[..]).chain(&mut *stream);
+    tokio::select! {
+        biased;
+        _ = shutdown.cancelled() => Err(ProcessingError::transient("parser service is stopping")),
+        frame = timeout(frame_timeout, read_frame(&mut reader, FrameKind::Request, REQUEST_DATA_LIMIT)) => frame
+            .map_err(|_| ProcessingError::transient("parser IPC frame timed out"))?
+            .map_err(|_| ProcessingError::transient("invalid parser IPC request frame")),
+    }
+}
+
+async fn reject(stream: &mut UnixStream, error: ProcessingError) -> Result<(), ProcessingError> {
+    let code = ErrorCode::from_error(&error);
+    let _ = write_response(stream, Operation::Error { code }, Vec::new()).await;
+    Err(error)
+}
+
+fn protocol_violation() -> ProcessingError {
+    ProcessingError::permanent(RejectReason::ProtocolViolation.message())
 }
 
 async fn serve_document(
     stream: &mut UnixStream,
     document: ParserDocument,
+    deadline: Instant,
+    service: ServiceLimits,
     shutdown: CancellationToken,
 ) -> Result<(), ProcessingError> {
     loop {
-        let frame = tokio::select! {
-            biased;
-            _ = shutdown.cancelled() => return Err(ProcessingError::transient("parser service is stopping")),
-            result = timeout(IPC_FRAME_TIMEOUT, read_frame(stream, FrameKind::Request, REQUEST_DATA_LIMIT)) => {
-                result.map_err(|_| ProcessingError::transient("parser IPC frame timed out"))?
-                    .map_err(|_| ProcessingError::transient("parser session disconnected"))?
-            }
-        };
+        let frame = read_request(stream, deadline, service.frame_timeout, &shutdown).await?;
         if !frame.data.is_empty() {
             return Err(ProcessingError::permanent(
                 "parser operation does not accept a data payload",
@@ -271,14 +378,12 @@ async fn serve_document(
             )
             .await
             .and_then(native_text_frame),
-            _ => Err(ProcessingError::permanent(
-                "invalid parser session operation",
-            )),
+            _ => Err(protocol_violation()),
         };
         match result {
             Ok((operation, data)) => write_response(stream, operation, data).await?,
             Err(error) => {
-                let code = map_error(&error, false);
+                let code = ErrorCode::from_error(&error);
                 write_response(stream, Operation::Error { code }, Vec::new()).await?;
                 if error.retryable {
                     return Err(error);
@@ -302,7 +407,9 @@ async fn open_document(
     let filename = match media_type {
         "application/pdf" => {
             if !input.starts_with(b"%PDF-") {
-                return Err(ProcessingError::permanent("invalid PDF input"));
+                return Err(ProcessingError::permanent(
+                    "input does not have a PDF header",
+                ));
             }
             "document.pdf"
         }
@@ -311,7 +418,7 @@ async fn open_document(
         "image/webp" => "document.webp",
         _ => {
             return Err(ProcessingError::permanent(
-                "unsupported document media type",
+                "supported media types are PDF, PNG, JPEG, and WebP",
             ));
         }
     };
@@ -333,7 +440,7 @@ async fn open_document(
         .command(directory.path())?;
         let output = run_pdf_command(command, directory.clone(), None, limits, cancelled).await?;
         let text = std::str::from_utf8(&output)
-            .map_err(|_| ProcessingError::permanent("invalid PDF metadata"))?;
+            .map_err(|_| ProcessingError::permanent("PDF metadata is not valid UTF-8"))?;
         preparation::parse_pdf_pages(text, max_pages)?
     } else {
         let expected = match media_type {
@@ -343,20 +450,23 @@ async fn open_document(
         };
         let bytes = read_file_limited(&input_path, REQUEST_DATA_LIMIT).await?;
         let actual = image::guess_format(&bytes)
-            .map_err(|_| ProcessingError::permanent("invalid image input"))?;
+            .map_err(|_| ProcessingError::permanent("input is not a supported image"))?;
         if actual != expected {
             return Err(ProcessingError::permanent(
-                "image bytes do not match declared media type",
+                "image bytes do not match the declared media type",
             ));
         }
         let dimensions = ImageReader::with_format(std::io::Cursor::new(bytes), actual)
             .into_dimensions()
-            .map_err(|_| ProcessingError::permanent("invalid image dimensions"))?;
+            .map_err(|_| ProcessingError::permanent("cannot read image dimensions"))?;
         if dimensions.0 == 0
             || dimensions.1 == 0
             || u64::from(dimensions.0) * u64::from(dimensions.1) > limits.max_pixels
         {
-            return Err(ProcessingError::permanent("image pixel limit exceeded"));
+            return Err(ProcessingError::permanent(format!(
+                "image exceeds the {} pixel limit",
+                limits.max_pixels
+            )));
         }
         1
     };
@@ -392,7 +502,7 @@ async fn page_info(
     )
     .await?;
     let text = std::str::from_utf8(&output)
-        .map_err(|_| ProcessingError::permanent("invalid PDF page metadata"))?;
+        .map_err(|_| ProcessingError::permanent("PDF metadata is not valid UTF-8"))?;
     preparation::parse_pdf_page_size(text, page)
 }
 
@@ -547,6 +657,7 @@ fn validate_limits(
     render_dpi: u32,
     page_max_edge: u32,
     timeout_seconds: u64,
+    session_timeout_seconds: u64,
 ) -> Result<RenderLimits, ProcessingError> {
     if max_pages == 0
         || max_pages > MAX_PAGE_COUNT
@@ -558,9 +669,10 @@ fn validate_limits(
         || !(32..=MAX_IMAGE_EDGE).contains(&page_max_edge)
         || timeout_seconds == 0
         || timeout_seconds > 600
+        || !(1..=MAX_SESSION_TIMEOUT_SECONDS).contains(&session_timeout_seconds)
     {
         return Err(ProcessingError::permanent(
-            "parser operation limits are invalid",
+            RejectReason::InvalidLimits.message(),
         ));
     }
     Ok(RenderLimits {
@@ -599,7 +711,7 @@ async fn write_response(
     data: Vec<u8>,
 ) -> Result<(), ProcessingError> {
     timeout(
-        IPC_FRAME_TIMEOUT,
+        IPC_WRITE_TIMEOUT,
         write_frame(
             stream,
             FrameKind::Response,
@@ -673,35 +785,6 @@ fn native_text_frame(blocks: Vec<SourceBlock>) -> Result<(Operation, Vec<u8>), P
         ));
     }
     Ok((Operation::NativeTextResult, data))
-}
-
-fn map_error(error: &ProcessingError, opening: bool) -> ErrorCode {
-    if error.retryable {
-        return ErrorCode::Internal;
-    }
-    if let Some((actual, limit)) = page_limit_details(&error.message) {
-        ErrorCode::PageLimitExceeded { actual, limit }
-    } else if error.message.contains("page number") {
-        ErrorCode::InvalidPage
-    } else if error.message.contains("image") && error.message.contains("limit") {
-        ErrorCode::OutputLimit
-    } else if error.message.contains("render") || error.message.contains("PDF process") {
-        ErrorCode::RenderFailed
-    } else if error.message.contains("image") || error.message.contains("PDF") {
-        if opening {
-            ErrorCode::InvalidDocument
-        } else {
-            ErrorCode::DecodeFailed
-        }
-    } else {
-        ErrorCode::Internal
-    }
-}
-
-fn page_limit_details(message: &str) -> Option<(u32, u32)> {
-    let rest = message.strip_prefix("PDF has ")?;
-    let (actual, rest) = rest.split_once(" pages; the limit is ")?;
-    Some((actual.parse().ok()?, rest.parse().ok()?))
 }
 
 async fn prepare_socket_path(socket_path: &Path) -> Result<(), ProcessingError> {
@@ -801,6 +884,10 @@ mod tests {
 
     impl TestServer {
         async fn start() -> Self {
+            Self::start_with(ServiceLimits::default()).await
+        }
+
+        async fn start_with(limits: ServiceLimits) -> Self {
             let directory = tempfile::tempdir().unwrap();
             let socket_root = directory.path().join("socket");
             std::fs::create_dir(&socket_root).unwrap();
@@ -816,7 +903,7 @@ mod tests {
             let service_scratch = scratch_root.clone();
             let service_shutdown = shutdown.clone();
             let mut task = tokio::spawn(async move {
-                serve(&service_path, &service_scratch, service_shutdown).await
+                serve(&service_path, &service_scratch, limits, service_shutdown).await
             });
             tokio::time::timeout(Duration::from_secs(2), async {
                 while !path.exists() {
@@ -852,7 +939,156 @@ mod tests {
     #[tokio::test]
     async fn socket_accepts_health_then_closes_without_document_state() {
         let server = TestServer::start().await;
-        crate::parser_client::health_check(&server.path, Duration::from_secs(1))
+        let capacity = crate::parser_client::health_check(&server.path, Duration::from_secs(1))
+            .await
+            .unwrap();
+        assert_eq!(capacity.max_sessions, DEFAULT_MAX_SESSIONS);
+        assert_eq!(capacity.active_sessions, 0);
+    }
+
+    fn png(width: u32, height: u32) -> Vec<u8> {
+        let mut png = std::io::Cursor::new(Vec::new());
+        image::RgbImage::from_pixel(width, height, image::Rgb([255; 3]))
+            .write_to(&mut png, ImageFormat::Png)
+            .unwrap();
+        png.into_inner()
+    }
+
+    async fn open_png(
+        server: &TestServer,
+        limits: crate::parser_client::ParserLimits,
+    ) -> Result<crate::parser_client::ParserSession, ProcessingError> {
+        crate::parser_client::ParserSession::open(
+            &server.path,
+            png(8, 4),
+            "image/png",
+            limits,
+            CancellationToken::new(),
+        )
+        .await
+    }
+
+    #[tokio::test]
+    async fn session_survives_idle_gaps_longer_than_a_frame_until_its_deadline() {
+        let server = TestServer::start_with(ServiceLimits {
+            frame_timeout: Duration::from_millis(200),
+            session_grace: Duration::ZERO,
+            ..ServiceLimits::default()
+        })
+        .await;
+        let limits = crate::parser_client::ParserLimits {
+            session_timeout_seconds: 1,
+            ..Default::default()
+        };
+        let session = open_png(&server, limits).await.unwrap();
+        // Model inference between parser calls is far longer than one frame.
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        let page = session
+            .render_rgb(1, RenderProfile::FullPage, CancellationToken::new())
+            .await
+            .unwrap();
+        assert_eq!(page.dimensions(), (8, 4));
+
+        tokio::time::sleep(Duration::from_millis(700)).await;
+        let expired = session
+            .render_rgb(1, RenderProfile::FullPage, CancellationToken::new())
+            .await
+            .unwrap_err();
+        assert!(expired.retryable, "{expired}");
+        let capacity = crate::parser_client::health_check(&server.path, Duration::from_secs(1))
+            .await
+            .unwrap();
+        assert_eq!(capacity.active_sessions, 0);
+    }
+
+    #[tokio::test]
+    async fn stalled_partial_frame_is_closed_after_one_frame_timeout() {
+        use tokio::io::AsyncWriteExt;
+
+        let server = TestServer::start_with(ServiceLimits {
+            frame_timeout: Duration::from_millis(200),
+            ..ServiceLimits::default()
+        })
+        .await;
+        let mut stream = UnixStream::connect(&server.path).await.unwrap();
+        stream.write_all(b"OCR").await.unwrap();
+        let mut buffer = [0_u8; 1];
+        let closed = tokio::time::timeout(Duration::from_secs(2), stream.read(&mut buffer))
+            .await
+            .expect("stalled request must not pin a parser connection");
+        assert_eq!(closed.unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn health_reports_capacity_when_full_and_busy_open_waits_for_a_slot() {
+        let server = TestServer::start_with(ServiceLimits {
+            max_sessions: 1,
+            ..ServiceLimits::default()
+        })
+        .await;
+        let first = open_png(&server, Default::default()).await.unwrap();
+        let capacity = crate::parser_client::health_check(&server.path, Duration::from_secs(1))
+            .await
+            .unwrap();
+        assert_eq!((capacity.max_sessions, capacity.active_sessions), (1, 1));
+
+        let short = crate::parser_client::ParserLimits {
+            timeout_seconds: 1,
+            ..Default::default()
+        };
+        let busy = open_png(&server, short).await.err().unwrap();
+        assert_eq!(busy.message, "isolated parser is at capacity");
+        assert!(busy.retryable);
+
+        let release = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            drop(first);
+        });
+        let waited = open_png(&server, Default::default()).await.unwrap();
+        assert_eq!(waited.page_count(), 1);
+        release.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn typed_errors_keep_canonical_messages_and_permanent_errors_keep_the_session() {
+        let server = TestServer::start().await;
+        let error = crate::parser_client::ParserSession::open(
+            &server.path,
+            b"not a pdf".to_vec(),
+            "application/pdf",
+            Default::default(),
+            CancellationToken::new(),
+        )
+        .await
+        .err()
+        .unwrap();
+        assert_eq!(error.message, "input does not have a PDF header");
+        assert!(!error.retryable);
+
+        let mismatch = crate::parser_client::ParserSession::open(
+            &server.path,
+            png(2, 2),
+            "image/jpeg",
+            Default::default(),
+            CancellationToken::new(),
+        )
+        .await
+        .err()
+        .unwrap();
+        assert_eq!(
+            mismatch.message,
+            "image bytes do not match the declared media type"
+        );
+
+        let session = open_png(&server, Default::default()).await.unwrap();
+        let invalid = session
+            .render_rgb(2, RenderProfile::FullPage, CancellationToken::new())
+            .await
+            .unwrap_err();
+        assert_eq!(invalid.message, "invalid document page number");
+        assert!(!invalid.retryable);
+        session
+            .render_rgb(1, RenderProfile::FullPage, CancellationToken::new())
             .await
             .unwrap();
     }

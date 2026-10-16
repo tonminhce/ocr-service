@@ -92,10 +92,11 @@ services:
     volumes:
       - parser-socket-data:/run/ocr-parser
     tmpfs:
-      - /scratch:size=512m,mode=0700,uid=10002,gid=10002,noexec,nosuid,nodev
+      - /scratch:size=1g,mode=0700,uid=10002,gid=10002,noexec,nosuid,nodev
     environment:
       OCR_PARSER_SOCKET_PATH: /run/ocr-parser/parser.sock
       OCR_PARSER_SCRATCH_DIR: /scratch
+      OCR_PARSER_MAX_SESSIONS: ${PARSER_MAX_SESSIONS:-8}
       RUST_LOG: ${RUST_LOG:-warn}
     cpus: 2
     mem_limit: 2g

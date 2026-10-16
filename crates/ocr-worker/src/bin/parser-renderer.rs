@@ -21,13 +21,19 @@ async fn main() -> Result<()> {
         }
         (None, None) => {
             let scratch_root = ocr_worker::parser_service::scratch_root_from_env()?;
+            let limits = ocr_worker::parser_service::ServiceLimits::from_env()?;
             let shutdown = CancellationToken::new();
             let signal = shutdown.clone();
             tokio::spawn(async move {
                 shutdown_signal().await;
                 signal.cancel();
             });
-            ocr_worker::parser_service::serve(&socket_path, &scratch_root, shutdown).await?;
+            tracing::info!(
+                max_sessions = limits.max_sessions,
+                "isolated parser listening"
+            );
+            ocr_worker::parser_service::serve(&socket_path, &scratch_root, limits, shutdown)
+                .await?;
             Ok(())
         }
         _ => bail!("parser-renderer accepts no arguments or --healthcheck"),
