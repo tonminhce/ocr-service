@@ -99,11 +99,60 @@ The client is bounded to 1–4 concurrent documents, 5–3600 seconds per docume
 
 `--worker-concurrency` and `--region-concurrency` are **operator-declared metadata**. The report sets `runtime_configuration_verified=false`; this client does not silently change settings or claim that they were verified. Set the actual Docker worker/model configuration separately, record the image/model/layout revisions and host configuration, and attach the corresponding metrics snapshot to each experiment. Compare a baseline W=1/R=1 against bounded alternatives under the same document corpus and backend. Keep repetitions and warm-up behavior consistent. Do not compare a warm native Metal run directly with a cold GPU vLLM run as if backend and resource conditions were identical.
 
-After a timeout or client cancellation, already accepted durable server jobs continue. Per-document report entries retain accepted job UUIDs for inspection. Wait for them to finish before starting another configuration so runs do not overlap. Correlate results with [stage metrics](observability.md), model queue/latency/tokens, host RSS/CPU/GPU and error rates. Higher concurrency is useful only when successful throughput improves within the required memory and tail-latency budgets. This runner does not implement server-side cancellation, continuous arrival-rate generation, distributed load, confidence calibration or automatic tuning.
+After a timeout or client cancellation, already accepted durable server jobs continue. Per-document report entries retain accepted job UUIDs for inspection. Wait for them to finish before starting another configuration so runs do not overlap. Correlate results with [stage metrics](observability.md), model queue/latency/tokens, host RSS/CPU/GPU and error rates. Higher concurrency is useful only when successful throughput improves within the required memory and tail-latency budgets. The closed-loop `benchmark` mode remains finite and client-paced; it is not a production capacity result.
+
+## Bounded arrival-rate experiments
+
+`arrival` schedules fixed-rate or seeded-Poisson occurrences independently of
+client completion. When a due occurrence arrives while all client slots are
+occupied, it is recorded as skipped instead of silently delaying the schedule.
+The runner has hard caps for duration, scheduled jobs, total source bytes and
+pending submit/poll tasks. Repeated corpus entries use an idempotency key built
+from run ID, occurrence sequence and source fingerprint; repetitions are load
+occurrences, not independent quality samples.
+
+Example fixed-rate run against a **disposable** API stack:
+
+```sh
+cargo run --release --locked -p ocr-eval -- arrival \
+  artifacts/evaluation/manifest.json --split test \
+  --base-url http://127.0.0.1:8080 --clients 4 \
+  --worker-concurrency 1 --region-concurrency 1 \
+  --deadline-seconds 600 --profile vi_rental_contract_v1 \
+  --arrival-mode fixed --rate-per-second 0.83 --duration-seconds 60 \
+  --max-jobs 50 --max-upload-bytes 536870912 --max-pending-tasks 4
+```
+
+The command requires explicit rate, duration, max jobs, max upload bytes and
+pending-task cap. Poisson mode additionally requires `--seed`. Supported bounds
+are 0.001–100 occurrences/second, 1–86,400 seconds, 1–10,000 occurrences, 1–4 GiB
+total source bytes and 1–4 pending tasks. Pending tasks cannot exceed `--clients`.
+Each input is still hash-checked immediately before upload and retains the
+existing 32 MiB per-source bound.
+
+The report separates scheduled, offered, accepted, rejected, completed, succeeded,
+failed, timed-out and outstanding work; it also records capacity/source skips,
+source bytes budgeted, actual offered rate over the scheduled window, scheduler
+lag p50/p95, schedule/client-drain/total elapsed time and maximum in-flight client tasks.
+Submission latency (source read, hash, upload through HTTP 202), accepted-to-terminal
+latency, and successful end-to-end latency each include their sample count and
+p50/p95. `failed` includes failed client submissions; `completed` counts accepted
+jobs observed in a terminal server state. `outstanding` counts accepted jobs for
+which the client did not observe a terminal state before its deadline. A fixed
+arrival due while the client cap is full is skipped and counted; it is not silently
+delayed. Byte-budget skips are reported separately. Treat reports and job UUIDs as
+private run artifacts. Accepted jobs may continue after timeout; client-drain time
+does not prove server jobs have terminated. Reconcile outstanding jobs and drain
+them before starting another run.
+
+The scheduler is tested with fake HTTP only. No target rate, arrival profile,
+memory envelope or capacity threshold has been selected from production data.
+Actual OCR load runs remain gated on adequate host headroom, an isolated stack,
+approved source documents and an agreed workload profile.
 
 ## Verification and primary sources
 
-Tests cover split leakage, duplicate identities, path/symlink escape, invalid/empty datasets, input size/hash changes, malformed evidence, arbitrary confidence rejection, exact conflict scoring, human corrections, and a real local HTTP fixture proving bounded client concurrency and compact status polling. HTTP fixtures do not run OCR inference and their throughput must not be presented as model performance.
+Tests cover split leakage, duplicate identities, path/symlink escape, invalid/empty datasets, input size/hash changes, malformed evidence, arbitrary confidence rejection, exact conflict scoring, human corrections, the closed-loop HTTP contract, and fake-server arrival overload/byte/rejection accounting. HTTP fixtures do not run OCR inference and their throughput must not be presented as model performance.
 
 The methodology is informed by [Google Document AI field evaluation](https://docs.cloud.google.com/document-ai/docs/evaluate), its separation of precision/recall and confidence thresholds, and scikit-learn's guidance on [data leakage](https://scikit-learn.org/stable/common_pitfalls.html) and [group-aware evaluation](https://scikit-learn.org/stable/modules/cross_validation.html). These motivate independent labels and split isolation; the exact metric contract above belongs to this evaluator and is not claimed to reproduce a vendor's scoring implementation.
 

@@ -18,7 +18,8 @@ Tài liệu chuyển [roadmap nghiên cứu](production-next-roadmap.md) thành 
 | A06a | IMPLEMENTED / VERIFIED:240 ordinary +86 explicit integration trên Mac;86 Linux ARM64 release tests. [Trace](a06a-execution-trace.md). Env/commands/process-group/scratch/shutdown hygiene; chưa phải parser sandbox |
 | A06b | IMPLEMENTED / VERIFIED ISOLATED: versioned Unix IPC, parser-only Poppler/decode container, synthetic parity, egress/resource/socket checks, ENOSPC/OOM/restart/recovery. [Trace](a06b-execution-trace.md). Không phải penetration test hoặc production cutover |
 | O01 | IMPLEMENTED / VERIFIED ISOLATED: cached 30-second PostgreSQL/Redis snapshots with bounded query budget, fixed non-PII gauges, freshness/error. [Trace](a06b-execution-trace.md), [metrics contract](observability.md). Alert thresholds, pool/storage/model health and production dashboards remain open |
-| O02/C/D/E03–E04/F/G | PLANNED or WAITING_FOR_DATA; independent labels, calibrated acceptance, release/rollback, alert policy and measured capacity remain gated |
+| E03 | IMPLEMENTED / VERIFIED FAKE HTTP: fixed/seeded-Poisson arrivals with finite duration/jobs/bytes/pending caps, unique occurrence idempotency, overload/byte/rejection accounting and scheduler lag. [Trace](e03-execution-trace.md). Real arrival-rate capacity evidence remains gated |
+| O02/C/D/E04/F/G | PLANNED or WAITING_FOR_DATA; independent labels, calibrated acceptance, release/rollback, alert policy and measured capacity remain gated |
 
 ## 1. Mục tiêu và ràng buộc đã chốt
 
@@ -237,11 +238,13 @@ completion đã qua tests. Policy không tự suy từ `RETENTION_DAYS`; apply l
 
 ### E03 — Bounded arrival-rate runner
 
-- **Files:** `ocr-eval/src/{benchmark,main,lib}.rs`, `arrival.rs` mới; HTTP fixture/scheduler tests và evaluation docs.
-- **Modes:** giữ closed-loop; thêm fixed-rate và seeded Poisson, finite duration/max jobs/max upload bytes/max pending submit-poll tasks. Schedule có thể tham chiếu lặp corpus entries đã verify mà không nhân duplicate hashes vào manifest. Mỗi scheduled occurrence có ID/accounting riêng và idempotency key gồm **run ID + occurrence sequence + source fingerprint**; chỉ retry chính occurrence đó dùng lại key. Run+source key một mình sẽ replay job và làm sai throughput. Repetitions không trở thành independent quality samples.
-- **Accounting:** scheduled/offered/accepted/rejected/client-skipped-or-late/completed/failed/timed-out/outstanding; actual offered rate và scheduler lag. Client cap không được âm thầm hạ offered load rồi báo đạt target. Accepted jobs sau client timeout vẫn có thể chạy; lưu private IDs và drain deadline, không bỏ chúng khỏi denominator.
-- **Metrics:** intake latency, accepted-to-completion, queue/drain time, unfinished jobs; p95 kèm n và warm/cold conditions. Execution goodput khác quality-qualified goodput trên labeled corpus; production sampling mới ước lượng quality, không có online oracle.
-- **Tests/gate:** fake HTTP trước: rate/seed/lag/cap, 429/503, slow status, cancellation, jobs hoàn tất sau deadline; no unbounded futures/bytes. W/R metadata không tự thay server; preflight nhận actual deployment manifest.
+**Status:** bounded fixed-rate/seeded-Poisson client implemented and verified against fake HTTP only; no real OCR capacity run. See [evaluation usage](evaluation.md). Existing closed-loop `benchmark` mode remains unchanged.
+
+- **Files:** `ocr-eval/src/arrival.rs`, `benchmark.rs`, `main.rs`, source-size preflight and fake HTTP tests; [evaluation operations](evaluation.md).
+- **Modes/bounds:** fixed-rate and seeded Poisson; finite duration, max jobs, max total source bytes and max pending tasks. A due arrival under client saturation is recorded as skipped, not silently deferred. Occurrences reuse verified corpus documents without adding duplicate hashes to the dataset manifest.
+- **Idempotency/accounting:** each occurrence key includes run ID, sequence and source fingerprint. Report distinguishes scheduled/offered/accepted/rejected/completed/succeeded/failed/timed-out/outstanding, source-byte/capacity skips, actual offered rate, scheduler lag, submission and accepted-to-terminal latencies with sample counts, and schedule/drain time. Accepted job IDs remain in private reports after client timeout; repetitions are not independent quality samples.
+- **Verified:** fake HTTP tests cover saturation, maximum in-flight tasks, unique occurrence keys, total byte cap, 429/503, and accepted jobs that outlive client deadlines. `ocr-eval` unit, benchmark, v1/v2 suites and strict Clippy pass. No actual OCR endpoint was invoked.
+- **Remaining gate:** agreed workload profile, approved corpus, sufficient host headroom, isolated evaluation services, drained accepted jobs, and serial real-model arrival/burst/soak runs. Client-offered load, execution goodput and quality-qualified goodput remain separate measures.
 
 ### E04 — Serial experiments, faults và Mac/GPU decision
 

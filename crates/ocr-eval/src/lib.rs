@@ -1,5 +1,6 @@
 //! Offline evaluation of manually labelled documents. No acceptance policy or
 //! numeric confidence calibration is inferred from a dataset or synthetic run.
+pub mod arrival;
 pub mod benchmark;
 pub mod v2;
 use anyhow::{Context, Result, bail, ensure};
@@ -214,6 +215,14 @@ impl Dataset {
     }
     pub fn source_file(&self, document: &Document) -> Result<PathBuf> {
         safe_resolve(&self.base, &document.source_path)
+    }
+    pub fn source_size(&self, document: &Document) -> Result<u64> {
+        let metadata = std::fs::metadata(self.source_file(document)?)?;
+        ensure!(
+            metadata.is_file() && metadata.len() <= MAX_SOURCE_BYTES as u64,
+            "source file exceeds its byte budget"
+        );
+        Ok(metadata.len())
     }
     pub fn source(&self, document: &Document) -> Result<Vec<u8>> {
         let bytes = read_bounded(&self.source_file(document)?, MAX_SOURCE_BYTES)?;

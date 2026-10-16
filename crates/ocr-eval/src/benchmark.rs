@@ -75,6 +75,10 @@ pub struct BenchmarkDocument {
     pub job_id: Option<Uuid>,
     pub status: String,
     pub latency_ms: f64,
+    #[serde(skip_serializing)]
+    pub submit_latency_ms: Option<f64>,
+    #[serde(skip_serializing)]
+    pub accepted_to_terminal_latency_ms: Option<f64>,
     pub attempts: Option<i32>,
     pub status_polls: u64,
     pub error_code: Option<String>,
@@ -108,15 +112,22 @@ pub async fn run(
 ) -> Result<BenchmarkReport> {
     let documents = dataset.selected(split)?;
     let run_id = Uuid::new_v4();
-    let client = Client::builder()
-        .timeout(Duration::from_secs(15))
-        .connect_timeout(Duration::from_secs(5))
-        .pool_max_idle_per_host(config.clients)
-        .redirect(reqwest::redirect::Policy::none())
-        .build()?;
+    let client = build_client(config)?;
     let started = Instant::now();
     let mut results: Vec<_> = stream::iter(documents)
-        .map(|document| execute_document(&client, dataset, document, config, run_id))
+        .map(|document| {
+            execute_document(
+                &client,
+                dataset,
+                document,
+                config,
+                Occurrence {
+                    run_id,
+                    sequence: None,
+                    expected_source_size: None,
+                },
+            )
+        })
         .buffer_unordered(config.clients)
         .collect()
         .await;
@@ -142,18 +153,28 @@ pub async fn run(
         limitations: vec!["W/R are operator-declared run metadata; this client neither verifies nor changes runtime concurrency.".into(), "Latency includes source-file loading, upload, queueing, processing and compact status polling; successful latency excludes failed/timed-out documents.".into(), "Timeout/cancellation stops client waiting; already accepted durable server jobs continue and may overlap a later run.".into(), "Polling resolution is 500ms; this runner does not measure GPU utilization, server RSS or OCR correctness.".into()],
     })
 }
-async fn execute_document(
+
+pub(crate) fn build_client(config: &BenchmarkConfig) -> Result<Client> {
+    Ok(Client::builder()
+        .timeout(Duration::from_secs(15))
+        .connect_timeout(Duration::from_secs(5))
+        .pool_max_idle_per_host(config.clients)
+        .redirect(reqwest::redirect::Policy::none())
+        .build()?)
+}
+
+pub(crate) async fn execute_document(
     client: &Client,
     dataset: &Dataset,
     document: &Document,
     config: &BenchmarkConfig,
-    run_id: Uuid,
+    occurrence: Occurrence,
 ) -> BenchmarkDocument {
     let started = Instant::now();
     let mut progress = Progress::default();
     let outcome = tokio::time::timeout(
         config.deadline,
-        execute(client, dataset, document, config, run_id, &mut progress),
+        execute(client, dataset, document, config, occurrence, &mut progress),
     )
     .await;
     let (status, attempts, error_code) = match outcome {
@@ -174,6 +195,8 @@ async fn execute_document(
         job_id: progress.job_id,
         status,
         latency_ms: started.elapsed().as_secs_f64() * 1000.0,
+        submit_latency_ms: progress.submit_latency_ms,
+        accepted_to_terminal_latency_ms: progress.accepted_to_terminal_latency_ms,
         attempts,
         status_polls: progress.polls,
         error_code,
@@ -193,15 +216,32 @@ struct Progress {
     polls: u64,
     accepted: bool,
     job_id: Option<Uuid>,
+    submit_latency_ms: Option<f64>,
+    accepted_at: Option<Instant>,
+    accepted_to_terminal_latency_ms: Option<f64>,
 }
+
+#[derive(Clone, Copy)]
+pub(crate) struct Occurrence {
+    pub run_id: Uuid,
+    pub sequence: Option<u64>,
+    pub expected_source_size: Option<u64>,
+}
+
 async fn execute(
     client: &Client,
     dataset: &Dataset,
     document: &Document,
     config: &BenchmarkConfig,
-    run_id: Uuid,
+    occurrence: Occurrence,
     progress: &mut Progress,
 ) -> std::result::Result<Status, String> {
+    let submission_started = Instant::now();
+    let Occurrence {
+        run_id,
+        sequence,
+        expected_source_size,
+    } = occurrence;
     // At most four input buffers exist. Validate hashes again at the point of use.
     let path = dataset
         .source_file(document)
@@ -229,6 +269,9 @@ async fn execute(
     .await
     .map_err(|_| "source_task_failed")?
     .map_err(|_| "source_read_or_hash_failed")?;
+    if expected_source_size.is_some_and(|expected| bytes.len() as u64 != expected) {
+        return Err("source_size_changed".into());
+    }
     let (mime, filename) = media(&bytes).ok_or("unsupported_source_media")?;
     let part = multipart::Part::bytes(bytes)
         .file_name(filename)
@@ -237,7 +280,11 @@ async fn execute(
     let form = multipart::Form::new()
         .part("file", part)
         .text("extraction_profile", config.extraction_profile.clone());
-    let key = format!("bench-{run_id}-{}", &document.source_sha256[..16]);
+    let source_fingerprint = &document.source_sha256[..16];
+    let key = match sequence {
+        Some(sequence) => format!("bench-{run_id}-{sequence}-{source_fingerprint}"),
+        None => format!("bench-{run_id}-{source_fingerprint}"),
+    };
     let response = client
         .post(
             config
@@ -255,6 +302,9 @@ async fn execute(
         return Err(format!("submit_http_{}", response.status().as_u16()));
     }
     progress.accepted = true;
+    let accepted_at = Instant::now();
+    progress.accepted_at = Some(accepted_at);
+    progress.submit_latency_ms = Some(submission_started.elapsed().as_secs_f64() * 1000.0);
     let submitted: Submitted =
         serde_json::from_slice(&response_bounded(response, 64 * 1024).await?)
             .map_err(|_| "submit_response_invalid")?;
@@ -277,7 +327,11 @@ async fn execute(
         let status: Status = serde_json::from_slice(&response_bounded(response, 16 * 1024).await?)
             .map_err(|_| "status_response_invalid")?;
         match status.status.as_str() {
-            "succeeded" | "failed" => return Ok(status),
+            "succeeded" | "failed" => {
+                progress.accepted_to_terminal_latency_ms =
+                    Some(accepted_at.elapsed().as_secs_f64() * 1000.0);
+                return Ok(status);
+            }
             "queued" | "processing" => tokio::time::sleep(config.poll_interval).await,
             _ => return Err("unknown_job_status".into()),
         }
@@ -317,7 +371,7 @@ fn media(bytes: &[u8]) -> Option<(&'static str, &'static str)> {
         None
     }
 }
-fn percentile(values: &[f64], quantile: f64) -> Option<f64> {
+pub(crate) fn percentile(values: &[f64], quantile: f64) -> Option<f64> {
     if values.is_empty() {
         return None;
     }

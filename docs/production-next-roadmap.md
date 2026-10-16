@@ -1,8 +1,8 @@
 # Roadmap nâng chất lượng và năng lực production
 
-Nghiên cứu và audit ngày 15/10/2026. **Đây là kế hoạch tiếp theo, chưa phải các tính năng vừa triển khai.** Lượt này không thay đổi code runtime, cấu hình đang chạy hay dữ liệu riêng tư.
+Nghiên cứu và audit ngày 15/10/2026; execution follow-up 16/10/2026. **A06b/O01 are implemented; E02 allocator controls and E03 arrival-runner scaffolding are now implemented, but their measurement/promotion gates remain open.** No live OCR runtime configuration or private source data was changed.
 
-[Kế hoạch thực thi chi tiết](production-execution-plan.md) tách roadmap này thành các gói code/test/deployment, phụ thuộc, tiêu chí nghiệm thu và rollback. Trạng thái thực thi nằm ở bảng đầu kế hoạch: M1 đã verified local, A03/A04 verified isolated, A05 logical backup/restore verified local, [A06a subprocess hygiene](a06a-execution-trace.md) đã kiểm trên Mac/Linux, [A06b parser isolation + O01 observer](a06b-execution-trace.md) đã kiểm cô lập; independent labels, production alert thresholds, quality/capacity and live adoption remain gated.
+[Kế hoạch thực thi chi tiết](production-execution-plan.md) tách roadmap này thành các gói code/test/deployment, phụ thuộc, tiêu chí nghiệm thu và rollback. Trạng thái đầy đủ nằm ở bảng đầu kế hoạch: M1 đã verified local, A03/A04 verified isolated, A05 logical backup/restore verified local, [A06a subprocess hygiene](a06a-execution-trace.md) đã kiểm trên Mac/Linux, [A06b parser isolation + O01 observer](a06b-execution-trace.md) đã kiểm cô lập. [E02](e02-memory-audit.md) has an allocator switch but no A/B result; E03 has fake-HTTP tests but no real capacity run. Independent labels, alert thresholds, quality/capacity acceptance and live adoption remain gated.
 
 Yêu cầu đã xác nhận: **Mac hiện tại trước, trên 1.000 tài liệu/ngày; GPU là phương án nâng cấp khi có số đo.** API/consumer/layout/extraction tiếp tục dùng Rust; Docker, Redis Streams và PostgreSQL được giữ lại. Layout → crop → recognition → Markdown + layout JSON vẫn là hợp đồng đầu ra. Runtime inference bên ngoài được phép. Phạm vi tài liệu đầu tiên nên tiếp tục là hợp đồng thuê tiếng Việt và CCCD đính kèm.
 
