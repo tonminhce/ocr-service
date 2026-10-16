@@ -518,9 +518,21 @@ async fn function_body_security_owner_drift_and_unknown_catalog_objects_are_dete
         .unwrap();
     let owner_changed = db.manifest().await;
     assert_ne!(changed.functions, owner_changed.functions);
-    sqlx::raw_sql("CREATE OR REPLACE FUNCTION public.guard_job_retention_delete() RETURNS trigger LANGUAGE plpgsql SECURITY INVOKER SET search_path=pg_catalog,pg_temp AS $$ BEGIN /* backup body fingerprint fixture */ RAISE EXCEPTION USING ERRCODE='P0001',MESSAGE='retention_apply_disabled'; END; $$;")
+    sqlx::raw_sql("CREATE OR REPLACE FUNCTION public.guard_job_retention_delete() RETURNS trigger LANGUAGE plpgsql SECURITY INVOKER SET search_path=pg_catalog,pg_temp AS $$ BEGIN PERFORM 1; RAISE EXCEPTION USING ERRCODE='P0001',MESSAGE='retention_apply_disabled'; END; $$;")
         .execute(&db.pool).await.unwrap();
-    assert_ne!(owner_changed.functions, db.manifest().await.functions);
+    let body_changed = db.manifest().await;
+    assert_eq!(owner_changed.tables, body_changed.tables);
+    let mut body_changes = 0;
+    for (before, after) in owner_changed.functions.iter().zip(&body_changed.functions) {
+        assert_eq!(before.function, after.function);
+        if before.function == "public.guard_job_retention_delete()" {
+            assert_ne!(before.sha256, after.sha256);
+            body_changes += 1;
+        } else {
+            assert_eq!(before.sha256, after.sha256);
+        }
+    }
+    assert_eq!(body_changes, 1);
     for (create, drop) in [
         (
             "CREATE FUNCTION public.guard_held_job_source(integer) RETURNS integer LANGUAGE SQL AS 'SELECT $1'",
