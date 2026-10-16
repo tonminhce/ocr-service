@@ -40,6 +40,8 @@ jobs:
       TEST_REDIS_OOM_URL: redis://localhost:6380/0
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
@@ -49,6 +51,8 @@ jobs:
         run: |
           python3 -m unittest discover -s scripts -p test_no_block_comments.py
           python3 scripts/check_no_block_comments.py
+          python3 -m unittest discover -s scripts -p test_no_new_comments.py
+          python3 scripts/check_no_new_comments.py
           python3 -m unittest discover -s scripts -p test_release_manifest.py
       - run: cargo fmt --all -- --check
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
