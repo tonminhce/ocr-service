@@ -126,10 +126,12 @@ struct OperationalSnapshotRow {
     eligible_jobs: i64,
     delayed_jobs: i64,
     oldest_queued_seconds: i64,
-    seconds_since_last_progress: i64,
+    oldest_eligible_seconds: i64,
+    seconds_since_last_lease_update: i64,
     due_outbox_jobs: i64,
     oldest_due_outbox_seconds: i64,
     expired_leases: i64,
+    database_bytes: i64,
 }
 
 impl Store {
@@ -167,11 +169,16 @@ impl Store {
     }
 
     /// One bounded aggregate query for the background operational observer.
-    /// Scrapes and request handlers never call this method.
+    /// Scrapes and request handlers never call this method. The server-side
+    /// statement timeout cancels the query itself; the client deadline also
+    /// covers pool acquisition.
     pub async fn operational_snapshot(&self) -> Result<OperationalSnapshot, StoreError> {
-        let row = tokio::time::timeout(
-            Duration::from_secs(3),
-            sqlx::query_as::<_, OperationalSnapshotRow>(
+        let snapshot = async {
+            let mut transaction = self.pool.begin().await?;
+            sqlx::query("SET LOCAL statement_timeout = '3s'")
+                .execute(&mut *transaction)
+                .await?;
+            let row = sqlx::query_as::<_, OperationalSnapshotRow>(
                 "SELECT \
                     (SELECT count(*) FROM jobs WHERE status = 'queued')::bigint AS queued_jobs, \
                     (SELECT count(*) FROM jobs WHERE status = 'processing')::bigint AS processing_jobs, \
@@ -179,15 +186,21 @@ impl Store {
                     (SELECT count(*) FROM jobs WHERE status = 'queued' AND available_at <= clock_timestamp())::bigint AS eligible_jobs, \
                     (SELECT count(*) FROM jobs WHERE status = 'queued' AND available_at > clock_timestamp())::bigint AS delayed_jobs, \
                     COALESCE((SELECT GREATEST(0, EXTRACT(EPOCH FROM clock_timestamp() - min(created_at))::bigint) FROM jobs WHERE status = 'queued'), 0)::bigint AS oldest_queued_seconds, \
-                    COALESCE((SELECT GREATEST(0, EXTRACT(EPOCH FROM clock_timestamp() - max(updated_at))::bigint) FROM jobs WHERE status = 'processing'), 0)::bigint AS seconds_since_last_progress, \
+                    COALESCE((SELECT GREATEST(0, EXTRACT(EPOCH FROM clock_timestamp() - min(available_at))::bigint) FROM jobs WHERE status = 'queued' AND available_at <= clock_timestamp()), 0)::bigint AS oldest_eligible_seconds, \
+                    COALESCE((SELECT GREATEST(0, EXTRACT(EPOCH FROM clock_timestamp() - max(updated_at))::bigint) FROM jobs WHERE status = 'processing'), 0)::bigint AS seconds_since_last_lease_update, \
                     (SELECT count(*) FROM job_outbox AS outbox JOIN jobs ON jobs.id = outbox.job_id WHERE outbox.next_dispatch_at <= clock_timestamp() AND (outbox.dispatch_lease_expires_at IS NULL OR outbox.dispatch_lease_expires_at <= clock_timestamp()) AND ((jobs.status = 'queued' AND jobs.available_at <= clock_timestamp()) OR (jobs.status = 'processing' AND jobs.lease_expires_at <= clock_timestamp())))::bigint AS due_outbox_jobs, \
                     COALESCE((SELECT GREATEST(0, EXTRACT(EPOCH FROM clock_timestamp() - min(outbox.next_dispatch_at))::bigint) FROM job_outbox AS outbox JOIN jobs ON jobs.id = outbox.job_id WHERE outbox.next_dispatch_at <= clock_timestamp() AND (outbox.dispatch_lease_expires_at IS NULL OR outbox.dispatch_lease_expires_at <= clock_timestamp()) AND ((jobs.status = 'queued' AND jobs.available_at <= clock_timestamp()) OR (jobs.status = 'processing' AND jobs.lease_expires_at <= clock_timestamp()))), 0)::bigint AS oldest_due_outbox_seconds, \
-                    (SELECT count(*) FROM jobs WHERE status = 'processing' AND lease_expires_at <= clock_timestamp())::bigint AS expired_leases",
+                    (SELECT count(*) FROM jobs WHERE status = 'processing' AND lease_expires_at <= clock_timestamp())::bigint AS expired_leases, \
+                    pg_database_size(current_database())::bigint AS database_bytes",
             )
-            .fetch_one(&self.pool),
-        )
-        .await
-        .map_err(|_| StoreError::OperationalSnapshotTimeout)??;
+            .fetch_one(&mut *transaction)
+            .await?;
+            transaction.rollback().await?;
+            Ok::<_, StoreError>(row)
+        };
+        let row = tokio::time::timeout(Duration::from_secs(4), snapshot)
+            .await
+            .map_err(|_| StoreError::OperationalSnapshotTimeout)??;
         Ok(OperationalSnapshot {
             queued_jobs: row.queued_jobs.max(0) as u64,
             processing_jobs: row.processing_jobs.max(0) as u64,
@@ -195,10 +208,12 @@ impl Store {
             eligible_jobs: row.eligible_jobs.max(0) as u64,
             delayed_jobs: row.delayed_jobs.max(0) as u64,
             oldest_queued_seconds: row.oldest_queued_seconds.max(0) as u64,
-            seconds_since_last_progress: row.seconds_since_last_progress.max(0) as u64,
+            oldest_eligible_seconds: row.oldest_eligible_seconds.max(0) as u64,
+            seconds_since_last_lease_update: row.seconds_since_last_lease_update.max(0) as u64,
             due_outbox_jobs: row.due_outbox_jobs.max(0) as u64,
             oldest_due_outbox_seconds: row.oldest_due_outbox_seconds.max(0) as u64,
             expired_leases: row.expired_leases.max(0) as u64,
+            database_bytes: row.database_bytes.max(0) as u64,
             ..OperationalSnapshot::default()
         })
     }

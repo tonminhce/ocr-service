@@ -72,10 +72,12 @@ pub struct OperationalSnapshot {
     pub eligible_jobs: u64,
     pub delayed_jobs: u64,
     pub oldest_queued_seconds: u64,
-    pub seconds_since_last_progress: u64,
+    pub oldest_eligible_seconds: u64,
+    pub seconds_since_last_lease_update: u64,
     pub due_outbox_jobs: u64,
     pub oldest_due_outbox_seconds: u64,
     pub expired_leases: u64,
+    pub database_bytes: u64,
     pub redis_pending_entries: u64,
     pub redis_memory_bytes: u64,
 }
@@ -426,11 +428,17 @@ impl Metrics {
                 "ocr_operational_oldest_queued_seconds {}",
                 snapshot.oldest_queued_seconds
             );
-            output.push_str("# HELP ocr_operational_seconds_since_last_progress Age of the most recent active-job update.\n# TYPE ocr_operational_seconds_since_last_progress gauge\n");
+            output.push_str("# HELP ocr_operational_oldest_eligible_seconds How long the longest-waiting eligible queued job has been claimable.\n# TYPE ocr_operational_oldest_eligible_seconds gauge\n");
             let _ = writeln!(
                 output,
-                "ocr_operational_seconds_since_last_progress {}",
-                snapshot.seconds_since_last_progress
+                "ocr_operational_oldest_eligible_seconds {}",
+                snapshot.oldest_eligible_seconds
+            );
+            output.push_str("# HELP ocr_operational_seconds_since_last_lease_update Age of the newest processing-row update; heartbeats count, so this is liveness, not OCR progress.\n# TYPE ocr_operational_seconds_since_last_lease_update gauge\n");
+            let _ = writeln!(
+                output,
+                "ocr_operational_seconds_since_last_lease_update {}",
+                snapshot.seconds_since_last_lease_update
             );
             output.push_str("# HELP ocr_operational_due_outbox_jobs Durable outbox records currently due for dispatch.\n# TYPE ocr_operational_due_outbox_jobs gauge\n");
             let _ = writeln!(
@@ -449,6 +457,12 @@ impl Metrics {
                 output,
                 "ocr_operational_expired_leases {}",
                 snapshot.expired_leases
+            );
+            output.push_str("# HELP ocr_operational_database_bytes PostgreSQL-reported size of the application database.\n# TYPE ocr_operational_database_bytes gauge\n");
+            let _ = writeln!(
+                output,
+                "ocr_operational_database_bytes {}",
+                snapshot.database_bytes
             );
             output.push_str("# HELP ocr_operational_redis_pending_entries Redis Stream pending-entry count.\n# TYPE ocr_operational_redis_pending_entries gauge\n");
             let _ = writeln!(
@@ -685,10 +699,12 @@ mod tests {
             eligible_jobs: 5,
             delayed_jobs: 2,
             oldest_queued_seconds: 19,
-            seconds_since_last_progress: 3,
+            oldest_eligible_seconds: 11,
+            seconds_since_last_lease_update: 3,
             due_outbox_jobs: 4,
             oldest_due_outbox_seconds: 8,
             expired_leases: 1,
+            database_bytes: 8192,
             redis_pending_entries: 6,
             redis_memory_bytes: 4096,
         });
@@ -696,6 +712,9 @@ mod tests {
         let output = metrics.render();
         assert!(output.contains("ocr_operational_jobs{state=\"queued\"} 7\n"));
         assert!(output.contains("ocr_operational_eligible_jobs 5\n"));
+        assert!(output.contains("ocr_operational_oldest_eligible_seconds 11\n"));
+        assert!(output.contains("ocr_operational_seconds_since_last_lease_update 3\n"));
+        assert!(output.contains("ocr_operational_database_bytes 8192\n"));
         assert!(output.contains("ocr_operational_redis_pending_entries 6\n"));
         assert!(output.contains("ocr_operational_redis_memory_bytes 4096\n"));
         assert!(output.contains("ocr_operational_collector_error 1\n"));

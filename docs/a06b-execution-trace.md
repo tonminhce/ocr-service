@@ -71,7 +71,7 @@ Verification:
 - Disposable Redis integration test: real pending stream entry yielded PEL count 1 and `INFO memory` returned a positive byte count.
 - Packaged protected worker scrape returned a fresh timestamp, `collector_error=0`, queued/processing/outbox/PEL/expired-lease values at 0, four recent synthetic failures, and Redis memory about 1.2 MB. The scrape did not trigger SQL/Redis reads.
 
-O01 does not yet expose PostgreSQL pool saturation/storage, Redis eviction rate, host CPU/RSS, or model-server health. No alert thresholds/routing are selected. Last-progress is a coarse age over `jobs.updated_at`, not a guarantee that useful OCR work is advancing.
+O01 does not yet expose PostgreSQL pool saturation, Redis eviction rate, host CPU/RSS, or model-server health. No alert thresholds/routing are selected. The original "last progress" gauge measured `jobs.updated_at`, which lease heartbeats also update, so it showed liveness rather than OCR progress. A follow-up renamed it to `seconds_since_last_lease_update`, added `oldest_eligible_seconds` and `database_bytes`, and moved the 3-second limit to a server-side `statement_timeout`.
 
 ## Final gates and remaining review
 

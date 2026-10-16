@@ -1520,7 +1520,14 @@ async fn operational_snapshot_reports_bounded_queue_and_lease_aggregates() {
         .await
         .unwrap()
         .unwrap();
-    db.store.submit(document(None)).await.unwrap();
+    let eligible_id = db.store.submit(document(None)).await.unwrap().job.id;
+    sqlx::query(
+        "UPDATE jobs SET available_at = clock_timestamp() - INTERVAL '90 seconds' WHERE id = $1",
+    )
+    .bind(eligible_id)
+    .execute(&db.pool)
+    .await
+    .unwrap();
     let delayed_id = db.store.submit(document(None)).await.unwrap().job.id;
     sqlx::query(
         "UPDATE jobs SET available_at = clock_timestamp() + INTERVAL '1 hour' WHERE id = $1",
@@ -1538,6 +1545,13 @@ async fn operational_snapshot_reports_bounded_queue_and_lease_aggregates() {
     assert_eq!(snapshot.delayed_jobs, 1);
     assert_eq!(snapshot.expired_leases, 1);
     assert_eq!(snapshot.due_outbox_jobs, 2);
+    // Waiting since available_at, not since submission; delayed jobs excluded.
+    assert!(
+        (90..120).contains(&snapshot.oldest_eligible_seconds),
+        "{}",
+        snapshot.oldest_eligible_seconds
+    );
+    assert!(snapshot.database_bytes > 0);
     db.cleanup().await;
 }
 
