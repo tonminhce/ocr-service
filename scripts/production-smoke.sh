@@ -13,13 +13,28 @@ cd "$(dirname "$0")/.."
 
 : "${PROD_IMAGE:?set PROD_IMAGE to the application image under test}"
 : "${PROD_PARSER_IMAGE:?set PROD_PARSER_IMAGE to the parser image under test}"
-project=${SMOKE_PROJECT:-rust-ocr-prod-smoke}
-if [[ "$project" != *smoke* ]]; then
-  echo "SMOKE_PROJECT must contain 'smoke' so a live project is never targeted" >&2
+project=${SMOKE_PROJECT:-rust-ocr-prod-smoke-$(date +%s)-$$}
+if ! [[ "$project" =~ ^rust-ocr-[a-z0-9-]*smoke[a-z0-9-]*$ ]]; then
+  echo "SMOKE_PROJECT must be a rust-ocr-*smoke* disposable project" >&2
+  exit 2
+fi
+if [[ -n "$(docker ps -aq --filter "label=com.docker.compose.project=$project")" ]]; then
+  echo "Refusing to reuse an existing Compose project for a fresh smoke" >&2
   exit 2
 fi
 out=${SMOKE_OUTPUT_DIR:-$PWD/artifacts/$project}
-export PROD_SECRETS_DIR=${PROD_SECRETS_DIR:-$out/secrets}
+umask 077
+if [[ -e "$out" ]]; then
+  echo "SMOKE_OUTPUT_DIR must be new; historical evidence is never overwritten" >&2
+  exit 2
+fi
+mkdir -p "$out"
+out=$(cd "$out" && pwd)
+if [[ -n "${PROD_SECRETS_DIR:-}" && "$PROD_SECRETS_DIR" != "$out/secrets" ]]; then
+  echo "Smoke requires newly generated secrets under its output directory" >&2
+  exit 2
+fi
+export PROD_SECRETS_DIR=$out/secrets
 export SMOKE_MOCK_DELAY_MS=${SMOKE_MOCK_DELAY_MS:-12000}
 export PROD_API_PORT=${PROD_API_PORT:-8580}
 export PROD_API_METRICS_PORT=${PROD_API_METRICS_PORT:-9591}
@@ -30,6 +45,24 @@ compose=(docker compose -p "$project" --env-file /dev/null
   -f compose.production.yaml -f compose.production.smoke.yaml)
 
 mkdir -p "$out"
+pending=
+cleanup() {
+  local status=$?
+  trap - EXIT
+  if [[ -n "$pending" ]]; then
+    kill "$pending" 2>/dev/null || true
+    wait "$pending" 2>/dev/null || true
+  fi
+  if [[ "${SMOKE_KEEP:-0}" != 1 ]]; then
+    "${compose[@]}" down || true
+  fi
+  exit "$status"
+}
+trap cleanup EXIT
+if ! [[ "$SMOKE_MOCK_DELAY_MS" =~ ^[0-9]+$ ]] || (( SMOKE_MOCK_DELAY_MS <= 10000 || SMOKE_MOCK_DELAY_MS > 60000 )); then
+  echo "SMOKE_MOCK_DELAY_MS must be 10001..60000 to exercise parser idle gaps" >&2
+  exit 2
+fi
 if [[ ! -d "$PROD_SECRETS_DIR" ]]; then
   parent=$(cd "$(dirname "$PROD_SECRETS_DIR")" && pwd)
   docker run --rm --network none --user "$(id -u):$(id -g)" \
@@ -60,11 +93,11 @@ client() { # output-name profile expected-pages
 }
 
 step "start disposable project $project (mock delay ${SMOKE_MOCK_DELAY_MS} ms)"
-"${compose[@]}" up -d --wait postgres redis parser
+"${compose[@]}" up -d --wait --no-build postgres redis parser
 "${compose[@]}" --profile ops run --rm --no-deps admin ocr-admin roles bootstrap
 "${compose[@]}" run --rm --no-deps migrate
 "${compose[@]}" --profile ops run --rm --no-deps admin ocr-admin roles grant
-"${compose[@]}" up -d --wait api worker mock-vllm
+"${compose[@]}" up -d --wait --no-build api worker mock-vllm
 
 step "1/3 two-page PDF with extraction profile across model latency > parser frame timeout"
 SECONDS=0
@@ -72,6 +105,9 @@ client profile-slow-model vi_rental_contract_v1 2
 echo "elapsed ${SECONDS}s"
 jq -e '[.pages[].page_number] == [1,2]
   and .execution.document_process_policy.parser.protocol_version == 2
+  and .strategy == "course_layout_vlm"
+  and ([.pages[].coverage.ocr_attempted_regions] == [1,1])
+  and (.layout | length) == 2
   and .extraction != null' "$out/profile-slow-model.json" >/dev/null
 expect_latest "succeeded 1"
 
@@ -83,6 +119,7 @@ sleep 15
 expect_latest "queued 0"
 "${compose[@]}" start parser
 wait "$pending"
+pending=
 expect_latest "succeeded 1"
 
 step "3/3 parser restarted during a job: one attempt lost, retry succeeds"
@@ -91,17 +128,25 @@ pending=$!
 sleep 4
 "${compose[@]}" restart parser
 wait "$pending"
+pending=
 expect_latest "succeeded 2"
 
 step "parser health and worker gate metrics"
 "${compose[@]}" exec -T parser parser-renderer --healthcheck
-curl -fsS -H "Authorization: Bearer $(cat "$PROD_SECRETS_DIR/metrics_token")" \
-  "http://127.0.0.1:$PROD_WORKER_METRICS_PORT/metrics" |
+python3 - "$PROD_SECRETS_DIR/metrics_token" "$PROD_WORKER_METRICS_PORT" <<'PY' |
+import pathlib
+import sys
+import urllib.request
+
+token = pathlib.Path(sys.argv[1]).read_text().strip()
+request = urllib.request.Request(
+    f"http://127.0.0.1:{int(sys.argv[2])}/metrics",
+    headers={"Authorization": "Bearer " + token},
+)
+with urllib.request.urlopen(request, timeout=10) as response:
+    print(response.read(1024 * 1024).decode(), end="")
+PY
   grep -E '^ocr_events_total\{event="parser_unavailable"\}|^ocr_job_attempts_total|^ocr_operational_(oldest_eligible|database_bytes)' |
   tee "$out/worker-metrics.txt"
 
-if [[ "${SMOKE_KEEP:-0}" != 1 ]]; then
-  step "stop project (volumes kept for inspection)"
-  "${compose[@]}" down
-fi
 echo "Packaged smoke passed: slow-model profile job, parser outage gating, parser restart recovery."

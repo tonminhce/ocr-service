@@ -3,7 +3,7 @@ WORKDIR /app
 COPY Cargo.toml Cargo.lock ./
 COPY crates ./crates
 RUN cargo build --release --locked --bin ocr-api --bin ocr-worker --bin parser-renderer --bin layout-detect --bin ocr-eval --bin ocr-admin --bin ocr-secrets --bin ocr-backup \
-    && cargo build --release --locked -p ocr-worker --example mock_vllm --example make_fixtures \
+    && cargo build --release --locked -p ocr-worker --example mock_vllm --example mock_layout --example make_fixtures \
     && cargo build --release --locked -p ocr-api --example service_client
 
 # Verification-only stage; no test tools/source enter the application image.
@@ -37,8 +37,10 @@ RUN cargo test --release --locked -p ocr-core --bin ocr-backup -- --nocapture \
 # Isolated one-shot operations image. Default application target stays last.
 FROM postgres:18@sha256:74935e72241653ca55e0414067e6d8763aceb8a810eb51b452253ec3dcfc4336 AS backup-ops
 RUN apt-get update \
+    && apt-get upgrade -y --no-install-recommends \
     && apt-get install -y --no-install-recommends age=1.2.1-1+b5 \
     && rm -rf /var/lib/apt/lists/* \
+    && rm -f /usr/local/bin/gosu \
     && useradd --uid 10001 --create-home ocr \
     && install -d -o 10001 -g 10001 -m 0700 /scratch /backups
 COPY --from=builder /app/target/release/ocr-backup /usr/local/bin/ocr-backup
@@ -54,6 +56,7 @@ COPY --from=backup-rehearsal-builder /app/target/release/examples/backup_rehears
 # Isolated document parser image: no API, worker, model, credentials, or ONNX runtime.
 FROM debian:bookworm-slim@sha256:7c7b2c966bc9ee8cedfeef67e0e279108992c77681fa595db4a9d65c06ccc587 AS parser-runtime
 RUN apt-get update \
+    && apt-get upgrade -y --no-install-recommends \
     && apt-get install -y --no-install-recommends poppler-utils \
     && rm -rf /var/lib/apt/lists/* \
     && useradd --uid 10002 --no-create-home --shell /usr/sbin/nologin ocr-parser \
@@ -64,6 +67,7 @@ ENTRYPOINT ["parser-renderer"]
 
 FROM debian:bookworm-slim@sha256:7c7b2c966bc9ee8cedfeef67e0e279108992c77681fa595db4a9d65c06ccc587
 RUN apt-get update \
+    && apt-get upgrade -y --no-install-recommends \
     && apt-get install -y --no-install-recommends ca-certificates \
     && rm -rf /var/lib/apt/lists/* \
     && useradd --uid 10001 --create-home ocr
@@ -80,6 +84,7 @@ ENV ORT_DYLIB_PATH=/opt/onnxruntime/lib/libonnxruntime.so.1.23.2
 COPY LICENSE THIRD_PARTY_NOTICES.md /usr/share/doc/ocr-service/
 COPY licenses /usr/share/doc/ocr-service/licenses
 COPY --from=builder /app/target/release/examples/mock_vllm /usr/local/bin/mock-vllm
+COPY --from=builder /app/target/release/examples/mock_layout /usr/local/bin/mock-layout
 COPY --from=builder /app/target/release/examples/make_fixtures /usr/local/bin/make-fixtures
 COPY --from=builder /app/target/release/examples/service_client /usr/local/bin/service-client
 USER 10001:10001
