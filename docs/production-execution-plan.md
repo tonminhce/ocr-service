@@ -232,6 +232,8 @@ completion đã qua tests. Policy không tự suy từ `RETENTION_DAYS`; apply l
 
 ### E02 — Memory trước concurrency
 
+Local build disk có [audit và kế hoạch tối ưu Cargo target](cargo-target-optimization-plan.md): 42.24 GiB chủ yếu ở debug artifacts; chưa cleanup/profile change. Đây là developer-cache task, không đóng gate memory/throughput E02/E04.
+
 **Trạng thái:** [allocation-owner audit + observer](e02-memory-audit.md) đã kiểm; allocator A/B control `layout-detect --cpu-arena on|off` is implemented with the production default unchanged. Chưa có allocator measurement, optimization promotion, representative workload envelope hoặc capacity gate. Ngày 16/10 host có 12.99/14.34 GiB swap-used, live worker 1.72/2 GiB current; A/B was intentionally deferred to avoid further pressure. Không tăng W/R/pool.
 
 The subsequent [bounded JSON-size increment](e02-json-budget-execution-trace.md) removes full output buffers used only for size checks and verifies exact compact-byte limits. Its local allocation probe reports zero heap allocation on accepted checks; mixed tiny timing observations do not establish an OCR speedup. Fresh-cgroup memory/headroom, allocator A/B and real capacity gates remain open.
