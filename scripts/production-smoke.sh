@@ -18,8 +18,10 @@ if ! [[ "$project" =~ ^rust-ocr-[a-z0-9-]*smoke[a-z0-9-]*$ ]]; then
   echo "SMOKE_PROJECT must be a rust-ocr-*smoke* disposable project" >&2
   exit 2
 fi
-if [[ -n "$(docker ps -aq --filter "label=com.docker.compose.project=$project")" ]]; then
-  echo "Refusing to reuse an existing Compose project for a fresh smoke" >&2
+if [[ -n "$(docker ps -aq --filter "label=com.docker.compose.project=$project")" ]] \
+  || [[ -n "$(docker volume ls -q --filter "label=com.docker.compose.project=$project")" ]] \
+  || [[ -n "$(docker network ls -q --filter "label=com.docker.compose.project=$project")" ]]; then
+  echo "Refusing to reuse existing Compose containers, volumes or networks for a fresh smoke" >&2
   exit 2
 fi
 out=${SMOKE_OUTPUT_DIR:-$PWD/artifacts/$project}
