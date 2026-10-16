@@ -617,21 +617,21 @@ async fn decode_rgb(
     directory: Arc<TempDir>,
     cancelled: CancellationToken,
 ) -> Result<RgbImage, ProcessingError> {
-    let permit = tokio::select! {
-        biased;
-        _ = cancelled.cancelled() => return Err(ProcessingError::transient("job processing cancelled")),
-        permit = DECODE_SLOTS.clone().acquire_owned() => permit
-            .map_err(|_| ProcessingError::transient("parser decode admission is stopping"))?,
-    };
+    let permit = crate::permit_or_cancelled(
+        &DECODE_SLOTS,
+        &cancelled,
+        "parser decode admission is stopping",
+    )
+    .await?;
     tokio::task::spawn_blocking(move || {
         let _permit = permit;
         let _directory = directory;
-        if cancelled.is_cancelled() {
-            return Err(ProcessingError::transient("job processing cancelled"));
+        if let Some(error) = crate::cancelled_error(&cancelled) {
+            return Err(error);
         }
         let rgb = preparation::normalize_rgb_image(&bytes, max_pixels, max_edge)?;
-        if cancelled.is_cancelled() {
-            return Err(ProcessingError::transient("job processing cancelled"));
+        if let Some(error) = crate::cancelled_error(&cancelled) {
+            return Err(error);
         }
         Ok(rgb)
     })

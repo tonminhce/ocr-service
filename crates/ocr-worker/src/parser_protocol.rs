@@ -153,7 +153,7 @@ impl ErrorCode {
     /// Parser side: classify by exact canonical text, never by substring.
     pub fn from_error(error: &ProcessingError) -> Self {
         if error.retryable {
-            return if error.message == "job processing cancelled" {
+            return if error.message == crate::CANCELLED_MESSAGE {
                 Self::Cancelled
             } else {
                 Self::Unavailable
@@ -177,7 +177,7 @@ impl ErrorCode {
     pub fn into_error(self) -> ProcessingError {
         match self {
             Self::Busy => ProcessingError::transient("isolated parser is at capacity"),
-            Self::Cancelled => ProcessingError::transient("job processing cancelled"),
+            Self::Cancelled => ProcessingError::cancelled(),
             Self::Unavailable => ProcessingError::transient("isolated parser is unavailable"),
             Self::PageLimitExceeded { actual, limit } => {
                 ProcessingError::permanent(format!("PDF has {actual} pages; the limit is {limit}"))
@@ -464,8 +464,7 @@ mod tests {
         let transient = ErrorCode::from_error(&ProcessingError::transient("disk busy"));
         assert_eq!(transient, ErrorCode::Unavailable);
         assert!(transient.into_error().retryable);
-        let cancelled =
-            ErrorCode::from_error(&ProcessingError::transient("job processing cancelled"));
+        let cancelled = ErrorCode::from_error(&ProcessingError::cancelled());
         assert_eq!(cancelled, ErrorCode::Cancelled);
         assert!(ErrorCode::Busy.into_error().retryable);
     }

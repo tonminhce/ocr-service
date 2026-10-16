@@ -62,7 +62,7 @@ impl Failure {
             Self::AdmissionDeadline => {
                 ProcessingError::transient("native process admission timed out")
             }
-            Self::Cancelled => ProcessingError::transient("job processing cancelled"),
+            Self::Cancelled => ProcessingError::cancelled(),
             Self::Cleanup => ProcessingError::transient(
                 "native process cleanup is still pending; processing slot remains held",
             ),

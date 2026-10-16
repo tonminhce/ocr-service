@@ -259,7 +259,7 @@ impl ParserSession {
         };
         let result = tokio::select! {
             biased;
-            _ = cancelled.cancelled() => Err(ProcessingError::transient("job processing cancelled")),
+            _ = cancelled.cancelled() => Err(ProcessingError::cancelled()),
             result = tokio::time::timeout(self.timeout, exchange) => match result {
                 Ok(result) => result,
                 Err(_) => Err(ProcessingError::transient("isolated parser operation timed out")),
@@ -333,7 +333,7 @@ async fn admit(
                 drop(stream);
                 tokio::select! {
                     biased;
-                    _ = cancelled.cancelled() => return Err(ProcessingError::transient("job processing cancelled")),
+                    _ = cancelled.cancelled() => return Err(ProcessingError::cancelled()),
                     _ = tokio::time::sleep(backoff) => {}
                 }
                 backoff = (backoff * 2).min(ADMISSION_BACKOFF_MAX);
@@ -353,7 +353,7 @@ async fn connect(
 ) -> Result<UnixStream, ProcessingError> {
     tokio::select! {
         biased;
-        _ = cancelled.cancelled() => Err(ProcessingError::transient("job processing cancelled")),
+        _ = cancelled.cancelled() => Err(ProcessingError::cancelled()),
         result = timeout(budget.min(CONNECT_TIMEOUT), UnixStream::connect(socket_path)) => match result {
             Ok(Ok(stream)) => Ok(stream),
             Ok(Err(_)) => Err(parser_unavailable()),
@@ -381,7 +381,7 @@ async fn exchange(
     };
     tokio::select! {
         biased;
-        _ = cancelled.cancelled() => Err(ProcessingError::transient("job processing cancelled")),
+        _ = cancelled.cancelled() => Err(ProcessingError::cancelled()),
         result = timeout(budget, exchange) => match result {
             Ok(result) => result,
             Err(_) => Err(ProcessingError::transient("isolated parser operation timed out")),
@@ -396,7 +396,7 @@ async fn lock_stream<'a>(
 ) -> Result<MutexGuard<'a, Option<UnixStream>>, ProcessingError> {
     tokio::select! {
         biased;
-        _ = cancelled.cancelled() => Err(ProcessingError::transient("job processing cancelled")),
+        _ = cancelled.cancelled() => Err(ProcessingError::cancelled()),
         result = timeout(budget, stream.lock()) => result
             .map_err(|_| ProcessingError::transient("isolated parser admission timed out")),
     }

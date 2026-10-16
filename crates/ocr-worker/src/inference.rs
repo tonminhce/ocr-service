@@ -20,9 +20,9 @@ use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use crate::{
-    ProcessingError,
+    ProcessingError, cancelled_error,
     formatting::{LayoutResult, format_pages},
-    layout_runner, preparation,
+    layout_runner, permit_or_cancelled, preparation,
     settings::{OcrStrategy, Settings},
     telemetry::{self, CallTrace, ParsedUsage, Recorder, RunTelemetry},
 };
@@ -246,8 +246,8 @@ impl Recognizer {
         let mut pages = Vec::with_capacity(document.page_count() as usize);
         let mut content_bytes = 0_usize;
         for page_number in 1..=document.page_count() {
-            if cancelled.is_cancelled() {
-                return Err(ProcessingError::transient("job processing cancelled"));
+            if let Some(error) = cancelled_error(&cancelled) {
+                return Err(error);
             }
             let render_timer = process_metrics().timer(Stage::Render);
             let jpeg = preparation::prepare_page(
@@ -260,13 +260,13 @@ impl Recognizer {
             .await?;
             drop(render_timer);
             let markdown = tokio::select! {
-                _ = cancelled.cancelled() => return Err(ProcessingError::transient("job processing cancelled")),
+                _ = cancelled.cancelled() => return Err(ProcessingError::cancelled()),
                 text = self.transcribe_jpeg(&jpeg) => text,
             }
-                .map_err(|error| ProcessingError {
-                    message: format!("page {page_number}: {}", error.message),
-                    retryable: error.retryable,
-                })?;
+            .map_err(|error| ProcessingError {
+                message: format!("page {page_number}: {}", error.message),
+                retryable: error.retryable,
+            })?;
             content_bytes = content_bytes.saturating_add(markdown.len());
             if content_bytes > 4 * 1024 * 1024 {
                 return Err(ProcessingError::permanent(
@@ -313,8 +313,8 @@ impl Recognizer {
         let mut recovery_observations = Vec::new();
         let mut recovery_used = 0_usize;
         for page_number in 1..=document.page_count() {
-            if cancelled.is_cancelled() {
-                return Err(ProcessingError::transient("job processing cancelled"));
+            if let Some(error) = cancelled_error(&cancelled) {
+                return Err(error);
             }
             let render_timer = process_metrics().timer(Stage::Render);
             let page = Arc::new(
@@ -454,14 +454,12 @@ impl Recognizer {
                 nested_images,
             ));
         }
-        let permit = tokio::select! {
-            _ = cancelled.cancelled() => return Err(ProcessingError::transient("formatting cancelled")),
-            permit = self.decode_slots.clone().acquire_owned() => permit.map_err(|_|ProcessingError::transient("formatting is stopping"))?,
-        };
+        let permit =
+            permit_or_cancelled(&self.decode_slots, &cancelled, "formatting is stopping").await?;
         let settings = self.settings.clone();
         tokio::task::spawn_blocking(move || {
             let _permit = permit;
-            if cancelled.is_cancelled() { return Err(ProcessingError::transient("formatting cancelled")); }
+            if let Some(error) = cancelled_error(&cancelled) { return Err(error); }
         let _format_timer = process_metrics().timer(Stage::Format);
         let raw_regions = grouped.clone();
         let (layout, mut markdown) = format_pages(grouped);
@@ -543,10 +541,12 @@ impl Recognizer {
         let content = if region.task == Task::Skip && !image_ocr {
             None
         } else {
-            let permit = tokio::select! {
-                _ = cancelled.cancelled() => return Err(ProcessingError::transient("region processing cancelled")),
-                permit = self.decode_slots.clone().acquire_owned() => permit.map_err(|_|ProcessingError::transient("crop processing is stopping"))?,
-            };
+            let permit = permit_or_cancelled(
+                &self.decode_slots,
+                &cancelled,
+                "crop processing is stopping",
+            )
+            .await?;
             let bbox = region.bbox_2d;
             let polygon = region.polygon.clone();
             let max_edge = self.settings.max_image_edge;
@@ -559,8 +559,8 @@ impl Recognizer {
             let jpeg = tokio::task::spawn_blocking(move || {
                 let _permit = permit;
                 let _timer = process_metrics().timer(Stage::Crop);
-                if stopped.is_cancelled() {
-                    return Err(ProcessingError::transient("crop processing cancelled"));
+                if let Some(error) = cancelled_error(&stopped) {
+                    return Err(error);
                 }
                 preparation::encode_course_region_crop_with_padding(
                     &page, bbox, &polygon, max_edge, padding,
@@ -569,7 +569,7 @@ impl Recognizer {
             .await
             .map_err(|_| ProcessingError::transient("region crop task failed"))??;
             Some(tokio::select! {
-                _ = cancelled.cancelled() => return Err(ProcessingError::transient("region processing cancelled")),
+                _ = cancelled.cancelled() => return Err(ProcessingError::cancelled()),
                 text = self.transcribe(&jpeg, Some(if image_ocr {Task::Text} else {region.task})) => text?,
             })
         };
@@ -811,26 +811,24 @@ impl LayoutBudget {
                 "document exceeds the configured detected-region limit (including discarded regions)",
             ));
         }
-        let permit = tokio::select! {
-            _ = cancelled.cancelled() => return Err(ProcessingError::transient("layout accounting cancelled")),
-            permit = slots.acquire_owned() => permit.map_err(|_|ProcessingError::transient("layout accounting is stopping"))?,
-        };
+        let permit =
+            permit_or_cancelled(&slots, &cancelled, "layout accounting is stopping").await?;
         let remaining = MAX_LAYOUT_METADATA_BYTES.saturating_sub(self.bytes);
         let stopped = cancelled.clone();
         let (layout, bytes) = tokio::task::spawn_blocking(move || {
             // Ownership of the layout and CPU slot survives waiter cancellation.
             // Count serialization directly without allocating another JSON Vec.
             let _permit = permit;
-            if stopped.is_cancelled() {
-                return Err(ProcessingError::transient("layout accounting cancelled"));
+            if let Some(error) = cancelled_error(&stopped) {
+                return Err(error);
             }
             let bytes = layout_metadata_bytes(&layout, remaining)?;
             Ok((layout, bytes))
         })
         .await
         .map_err(|_| ProcessingError::transient("layout accounting task failed"))??;
-        if cancelled.is_cancelled() {
-            return Err(ProcessingError::transient("layout accounting cancelled"));
+        if let Some(error) = cancelled_error(&cancelled) {
+            return Err(error);
         }
         self.regions += regions;
         self.bytes += bytes;

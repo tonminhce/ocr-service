@@ -17,7 +17,7 @@ use tokio::{
 };
 use tokio_util::sync::CancellationToken;
 
-use crate::{ProcessingError, settings::Settings};
+use crate::{ProcessingError, cancelled_error, permit_or_cancelled, settings::Settings};
 
 /// The isolated parser owns document bytes and scratch until this session drops.
 pub struct Document {
@@ -44,8 +44,8 @@ pub(crate) async fn inspect_with_cancellation(
     settings: &Settings,
     cancelled: CancellationToken,
 ) -> Result<Document, ProcessingError> {
-    if cancelled.is_cancelled() {
-        return Err(ProcessingError::transient("job processing cancelled"));
+    if let Some(error) = cancelled_error(&cancelled) {
+        return Err(error);
     }
     let parser = crate::parser_client::ParserSession::open(
         &settings.parser_socket_path,
@@ -105,20 +105,18 @@ pub async fn prepare_page(
             cancelled.clone(),
         )
         .await?;
-    let permit = tokio::select! {
-        _ = cancelled.cancelled() => return Err(ProcessingError::transient("job processing cancelled")),
-        permit = decode_slots.acquire_owned() => permit.map_err(|_| ProcessingError::transient("image processing is stopping"))?,
-    };
+    let permit =
+        permit_or_cancelled(&decode_slots, &cancelled, "image processing is stopping").await?;
     tokio::task::spawn_blocking(move || {
         // Keep the permit inside the blocking closure, even if its async waiter
         // is cancelled. The compressed source was decoded in the isolated helper.
         let _permit = permit;
-        if cancelled.is_cancelled() {
-            return Err(ProcessingError::transient("job processing cancelled"));
+        if let Some(error) = cancelled_error(&cancelled) {
+            return Err(error);
         }
         let result = encode_jpeg(&rgb, 90)?;
-        if cancelled.is_cancelled() {
-            return Err(ProcessingError::transient("job processing cancelled"));
+        if let Some(error) = cancelled_error(&cancelled) {
+            return Err(error);
         }
         Ok(result)
     })
@@ -709,13 +707,16 @@ pub(crate) async fn write_scratch_input(
         .checked_add(Duration::from_secs(timeout_seconds))
         .filter(|_| timeout_seconds > 0 && timeout_seconds <= 600)
         .ok_or_else(|| ProcessingError::permanent("PDF input preparation deadline is invalid"))?;
-    let permit = tokio::select! {
-        biased;
-        _ = cancelled.cancelled() => return Err(ProcessingError::transient("job processing cancelled")),
-        permit = tokio::time::timeout_at(expires, SCRATCH_WRITES.clone().acquire_owned()) => permit
-            .map_err(|_| ProcessingError::transient("PDF input preparation admission timed out"))?
-            .map_err(|_| ProcessingError::transient("PDF input preparation is stopping"))?,
-    };
+    let permit = tokio::time::timeout_at(
+        expires,
+        permit_or_cancelled(
+            &SCRATCH_WRITES,
+            &cancelled,
+            "PDF input preparation is stopping",
+        ),
+    )
+    .await
+    .map_err(|_| ProcessingError::transient("PDF input preparation admission timed out"))??;
     let writing = tokio::task::spawn_blocking(move || {
         let _permit = permit;
         let _directory = directory;
@@ -724,7 +725,7 @@ pub(crate) async fn write_scratch_input(
     });
     tokio::select! {
         biased;
-        _ = cancelled.cancelled() => Err(ProcessingError::transient("job processing cancelled")),
+        _ = cancelled.cancelled() => Err(ProcessingError::cancelled()),
         result = tokio::time::timeout_at(expires, writing) => result
             .map_err(|_| ProcessingError::transient("PDF input preparation timed out"))?
             .map_err(|_| ProcessingError::transient("PDF input preparation task failed"))?,

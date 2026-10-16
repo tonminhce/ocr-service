@@ -66,10 +66,9 @@ pub async fn apply(
     } else {
         Vec::new()
     };
-    let permit = tokio::select! {
-        _=cancelled.cancelled()=>return Err(ProcessingError::transient("job processing cancelled")),
-        permit=PROCESSING_SLOTS.clone().acquire_owned()=>permit.map_err(|_|ProcessingError::transient("post-processing is stopping"))?,
-    };
+    let permit =
+        crate::permit_or_cancelled(&PROCESSING_SLOTS, &cancelled, "post-processing is stopping")
+            .await?;
     let stopped = cancelled.clone();
     let profile = profile.to_owned();
     let mut complete = std::mem::take(result);
@@ -102,8 +101,8 @@ pub async fn apply(
     })
     .await
     .map_err(|_| ProcessingError::transient("post-processing task failed"))??;
-    if cancelled.is_cancelled() {
-        return Err(ProcessingError::transient("job processing cancelled"));
+    if let Some(error) = crate::cancelled_error(&cancelled) {
+        return Err(error);
     }
     *result = complete;
     Ok(())
@@ -127,8 +126,8 @@ fn make_output(
         native,
         recovery,
     } = sources;
-    if cancelled.is_cancelled() {
-        return Err(ProcessingError::transient("job processing cancelled"));
+    if let Some(error) = crate::cancelled_error(cancelled) {
+        return Err(error);
     }
     let (mut blocks, pages) = select_sources(&ocr, &native);
     blocks.extend(recovery);
@@ -165,8 +164,8 @@ fn make_output(
         let _timer = process_metrics().timer(Stage::Validation);
         crate::extraction_validation::validate(&extraction, &blocks)?;
     }
-    if cancelled.is_cancelled() {
-        return Err(ProcessingError::transient("job processing cancelled"));
+    if let Some(error) = crate::cancelled_error(cancelled) {
+        return Err(error);
     }
     let raw_ocr_issues = ocr_extraction::extract(&ocr).issues;
     let native_comparison = compare_sources(&ocr, &native);
