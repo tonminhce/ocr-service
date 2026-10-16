@@ -99,7 +99,7 @@ The client is bounded to 1–4 concurrent documents, 5–3600 seconds per docume
 
 `--worker-concurrency` and `--region-concurrency` are **operator-declared metadata**. The report sets `runtime_configuration_verified=false`; this client does not silently change settings or claim that they were verified. Set the actual Docker worker/model configuration separately, record the image/model/layout revisions and host configuration, and attach the corresponding metrics snapshot to each experiment. Compare a baseline W=1/R=1 against bounded alternatives under the same document corpus and backend. Keep repetitions and warm-up behavior consistent. Do not compare a warm native Metal run directly with a cold GPU vLLM run as if backend and resource conditions were identical.
 
-After a timeout or client cancellation, already accepted durable server jobs continue. Per-document report entries retain accepted job UUIDs for inspection. Wait for them to finish before starting another configuration so runs do not overlap. Correlate results with [stage metrics](observability.md), model queue/latency/tokens, host RSS/CPU/GPU and error rates. Higher concurrency is useful only when successful throughput improves within the required memory and tail-latency budgets. The closed-loop `benchmark` mode remains finite and client-paced; it is not a production capacity result.
+After a timeout or client cancellation, accepted or acceptance-unknown submissions can leave durable server jobs running. Per-document report entries retain known job UUIDs, exact idempotency keys and explicit submission outcomes. A lost response, HTTP 408/5xx or submission deadline is unknown; an observed HTTP 202 remains accepted even if its body is invalid. Local preflight failures are not submitted, and other observed 4xx responses are rejected. Reconcile these private identifiers and wait for server work to drain before another configuration. The runner never retries submission automatically. Correlate results with [stage metrics](observability.md), model queue/latency/tokens, host RSS/CPU/GPU and error rates. Higher concurrency is useful only when successful throughput improves within required memory and tail-latency budgets. The closed-loop mode remains finite and client-paced; it is not a production capacity result.
 
 ## Bounded arrival-rate experiments
 
@@ -130,20 +130,33 @@ total source bytes and 1–4 pending tasks. Pending tasks cannot exceed `--clien
 Each input is still hash-checked immediately before upload and retains the
 existing 32 MiB per-source bound.
 
-The report separates scheduled, offered, accepted, rejected, completed, succeeded,
-failed, timed-out and outstanding work; it also records capacity/source skips,
-source bytes budgeted, actual offered rate over the scheduled window, scheduler
-lag p50/p95, schedule/client-drain/total elapsed time and maximum in-flight client tasks.
-Submission latency (source read, hash, upload through HTTP 202), accepted-to-terminal
-latency, and successful end-to-end latency each include their sample count and
-p50/p95. `failed` includes failed client submissions; `completed` counts accepted
-jobs observed in a terminal server state. `outstanding` counts accepted jobs for
-which the client did not observe a terminal state before its deadline. A fixed
-arrival due while the client cap is full is skipped and counted; it is not silently
-delayed. Byte-budget skips are reported separately. Treat reports and job UUIDs as
-private run artifacts. Accepted jobs may continue after timeout; client-drain time
-does not prove server jobs have terminated. Reconcile outstanding jobs and drain
-them before starting another run.
+The report separates scheduled/offered tasks, submission attempts, accepted,
+rejected, local failures, unknown acceptance, completed, succeeded, failed,
+timed-out and outstanding work. `offered = accepted + rejected + acceptance_unknown
++ not_submitted`; `submission_attempted = offered - not_submitted`. `completed`
+counts accepted jobs observed in a terminal server state. `accepted_outstanding`
+is accepted minus completed; `outstanding` also includes unknown acceptance.
+These counts express unresolved possible work, not proof of current server activity.
+
+Per-result `submission_started_offset_ms` records the monotonic client HTTP
+handoff after source/hash/multipart preparation. Actual handoffs in the exclusive
+scheduled window `[0, scheduled_window)` count toward
+`submission_starts_in_window_per_second`; starts at or after its end are separate.
+POST scheduling lag has its own sample count and p50/p95. Existing task scheduler
+lag and `offered_per_second` remain separate; the latter normalizes admitted tasks
+by the window. `submission_attempts_per_second` similarly normalizes all attempts,
+including attempts beginning during drain. Neither normalized rate is measured
+in-window POST timing, and even a measured handoff does not prove server receipt.
+
+Capacity/source/byte skips, schedule/client-drain/total elapsed time and maximum
+in-flight client tasks remain visible. Submission latency (source read, hash,
+upload through HTTP 202), accepted-to-terminal latency and successful end-to-end
+latency retain sample counts and p50/p95. `failed` includes client failures.
+A due arrival at full client capacity is skipped rather than silently delayed.
+Treat reports, keys and job UUIDs as private run artifacts. Client-drain time does
+not prove server work ended; reconcile all outstanding possible submissions before
+another run. See [outcome accounting](e03-submission-accounting-execution-trace.md)
+and [actual handoff timing](e03-submission-timing-execution-trace.md) for controls.
 
 The scheduler is tested with fake HTTP only. No target rate, arrival profile,
 memory envelope or capacity threshold has been selected from production data.

@@ -400,6 +400,30 @@ async fn sends_openai_multimodal_contract_and_preserves_page_result() {
 }
 
 #[tokio::test]
+async fn data_urls_preserve_base64_padding_and_bytes_for_bounded_inputs() {
+    let server = server(StatusCode::OK, completion("unchanged", "stop")).await;
+    let recognizer = Recognizer::new(settings(&server)).unwrap();
+    for length in [0, 1, 2, 3, 257, 65_536] {
+        let input: Vec<u8> = (0..length).map(|index| (index % 251) as u8).collect();
+        assert_eq!(
+            recognizer.transcribe_jpeg(&input).await.unwrap(),
+            "unchanged"
+        );
+        let captured = server.captured.lock().unwrap();
+        let (headers, request) = captured.last().unwrap();
+        assert_eq!(headers["content-type"], "application/json");
+        assert_eq!(headers["authorization"], "Bearer test-secret");
+        assert_eq!(
+            request["messages"][1]["content"][1]["image_url"]["url"],
+            format!("data:image/jpeg;base64,{}", STANDARD.encode(&input))
+        );
+        assert_eq!(request["temperature"], 0);
+        assert_eq!(request["stream"], false);
+        assert!(request.get("top_p").is_none());
+    }
+}
+
+#[tokio::test]
 async fn missing_isolated_parser_fails_closed_before_model_inference() {
     let directory = tempfile::tempdir().unwrap();
     let mut config = settings_for(

@@ -99,6 +99,7 @@ fn gold_singleton_ambiguity_is_valid_but_does_not_become_found() {
     );
     p["fields"][2]["state"] = json!("found");
     p["fields"][2]["ambiguity_reason"] = Value::Null;
+    p["observations"][2]["origin"] = json!("first_pass");
     assert_eq!(
         report(&mut m, &p).unwrap().metrics.all_critical_accuracy,
         Some(0.0)
@@ -424,4 +425,75 @@ fn multi_candidate_recovery_only_cannot_include_first_pass_observations() {
     assert!(report(&mut m, &p).is_err());
     p["observations"][3]["origin"] = json!("recovery");
     assert!(report(&mut m, &p).is_ok());
+}
+
+#[test]
+fn found_predictions_reject_one_or_multiple_recovery_only_observations() {
+    for observation_count in [1, 2] {
+        let (mut manifest, mut prediction) = fixture();
+        let gold_observations = manifest["cases"][0]["observations"].clone();
+        let gold_fields = manifest["cases"][0]["fields"].clone();
+        prediction["observations"][0]["origin"] = json!("recovery");
+        if observation_count == 2 {
+            let mut recovery = prediction["observations"][0].clone();
+            recovery["id"] = json!("pred-obs-a-name-second");
+            recovery["anchor"]["polygon"] = json!([[20, 300], [200, 300], [200, 330], [20, 330]]);
+            prediction["observations"]
+                .as_array_mut()
+                .unwrap()
+                .push(recovery);
+            prediction["fields"][0]["observation_ids"]
+                .as_array_mut()
+                .unwrap()
+                .push(json!("pred-obs-a-name-second"));
+        }
+        refresh_evidence(&mut prediction);
+        let error = report(&mut manifest, &prediction).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "found prediction requires first-pass support"
+        );
+        assert_eq!(manifest["cases"][0]["observations"], gold_observations);
+        assert_eq!(manifest["cases"][0]["fields"], gold_fields);
+    }
+}
+
+#[test]
+fn found_prediction_with_first_pass_and_recovery_support_preserves_grounding() {
+    let (mut manifest, mut prediction) = fixture();
+    let mut gold = manifest["cases"][0]["observations"][0].clone();
+    gold["id"] = json!("obs-a-name-second");
+    gold["anchor"]["polygon"] = json!([[20, 300], [200, 300], [200, 330], [20, 330]]);
+    manifest["cases"][0]["observations"]
+        .as_array_mut()
+        .unwrap()
+        .push(gold);
+    manifest["cases"][0]["fields"][0]["target"]["observation_ids"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!("obs-a-name-second"));
+    let mut recovery = prediction["observations"][0].clone();
+    recovery["id"] = json!("pred-obs-a-name-second");
+    recovery["origin"] = json!("recovery");
+    recovery["anchor"]["polygon"] = json!([[20, 300], [200, 300], [200, 330], [20, 330]]);
+    prediction["observations"]
+        .as_array_mut()
+        .unwrap()
+        .push(recovery);
+    prediction["fields"][0]["observation_ids"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!("pred-obs-a-name-second"));
+    refresh_evidence(&mut prediction);
+    let result = report(&mut manifest, &prediction).unwrap();
+    assert_eq!(result.metrics.all_critical_accuracy, Some(1.0));
+    assert_eq!(result.metrics.field_grounded_exact, 4);
+    assert_eq!(result.metrics.candidates_exact, 6);
+    assert!(
+        manifest["cases"][0]["observations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|observation| observation["origin"] == "human_gold")
+    );
 }

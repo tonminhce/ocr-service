@@ -1,6 +1,6 @@
 # Local release candidates and rollback verification
 
-Updated2026-10-16. O02 tooling is partially implemented. Local verification and inventories do not authorize production rollout, registry publication or live-data changes. Three successful hosted CI runs, trusted registry/provenance verification, deployment configuration/model approval and production acceptance remain open.
+Updated2026-10-16. O02 tooling is partially implemented. Local verification and inventories do not authorize production rollout, registry publication or live-data changes. Three successful hosted CI runs for reviewed candidate sources, trusted registry/provenance verification, deployment configuration/model approval and production acceptance remain open. The [hosted audit](o02-hosted-ci-execution-trace.md) confirms three older successes, a later failed inventory run and no run for the current local HEAD/dirty sources; the fresh-runner runtime-image prerequisite now has a locally tested workflow fix.
 
 ## What CI now checks
 
@@ -76,6 +76,8 @@ python3 scripts/monitoring-smoke.py \
 The validators use pinned tools and a temporary synthetic credential. The drill requires matching already-built application/parser images, refuses an existing output/project namespace, creates fresh synthetic credentials and uses disposable services with loopback ports. It verifies local authenticated scrapes, rule firing/Alertmanager ingestion during parser/model, PostgreSQL and worker faults, recovery and preserved synthetic job rows, then scoped cleanup with volumes retained. Forty scrape requests with at most four concurrent clients form a small functional probe, not throughput sizing. It calls no real model and sends no external notification.
 
 Both local drills passed. The strengthened repeat passed all 18 checks, including resource/secret-mount boundaries, exact original-row preservation and runtime progression during PostgreSQL outage. It ended with four succeeded synthetic jobs and five attempts; the fresh recovery job succeeded on attempt one. See the [execution trace](o01-alerting-execution-trace.md). Configured CI is not evidence of hosted execution. Keep reports/logs private under ignored artifacts; inspect current execution evidence before release acceptance.
+
+The subsequent [parser boundary matrix](a06b-boundary-execution-trace.md) adds active IPv4 TCP denial with live positive controls, synthetic sibling mount absence, scratch noexec and worker socket permissions. It passed seven checks on specified historical Linux ARM64 images, preserved all baseline container IDs and retained its fresh socket volume. The harness accepts only locally available matching Linux image platforms and resolves immutable IDs without pulling/building; it does not start the application, database, worker or real models. CI now invokes it after building its images and running the packaged drill, and uploads its report. That is configured current-source coverage; no hosted run or current-worktree binary attestation is claimed by the historical local matrix.
 
 ## Remaining release gates
 

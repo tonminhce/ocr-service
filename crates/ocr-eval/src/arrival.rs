@@ -147,8 +147,8 @@ impl SeededRandom {
         value ^= value >> 7;
         value ^= value << 17;
         self.0 = value;
-        let mantissa = value >> 11;
-        (mantissa as f64 + 1.0) / 9_007_199_254_740_993.0
+        let mantissa = value >> 12;
+        (mantissa as f64 + 0.5) / 4_503_599_627_370_496.0
     }
 }
 
@@ -182,17 +182,28 @@ pub struct ArrivalReport {
     pub elapsed_seconds: f64,
     pub scheduled: usize,
     pub offered: usize,
+    pub submission_attempted: usize,
     pub accepted: usize,
     pub rejected: usize,
+    pub not_submitted: usize,
+    pub acceptance_unknown: usize,
     pub completed: usize,
     pub succeeded: usize,
     pub failed: usize,
     pub timed_out: usize,
     pub outstanding: usize,
+    pub accepted_outstanding: usize,
     pub client_skipped_or_late: usize,
     pub upload_budget_skipped: usize,
     pub source_bytes_budgeted: u64,
     pub offered_per_second: f64,
+    pub submission_attempts_per_second: f64,
+    pub submission_starts_in_window: usize,
+    pub submission_starts_after_window: usize,
+    pub submission_starts_in_window_per_second: f64,
+    pub submission_scheduling_lag_samples: usize,
+    pub submission_scheduling_lag_p50_ms: Option<f64>,
+    pub submission_scheduling_lag_p95_ms: Option<f64>,
     pub scheduler_lag_p50_ms: Option<f64>,
     pub scheduler_lag_p95_ms: Option<f64>,
     pub submission_latency_samples: usize,
@@ -304,6 +315,7 @@ pub async fn run(
                 benchmark_config,
                 benchmark::Occurrence {
                     run_id,
+                    run_started: started.into_std(),
                     sequence: Some(arrival.sequence),
                     expected_source_size: Some(source_size),
                 },
@@ -344,6 +356,20 @@ pub async fn run(
         .iter()
         .filter(|result| result.accepted)
         .count();
+    let rejected = offered_results
+        .iter()
+        .filter(|result| result.submission_outcome == benchmark::SubmissionOutcome::Rejected)
+        .count();
+    let not_submitted = offered_results
+        .iter()
+        .filter(|result| result.submission_outcome == benchmark::SubmissionOutcome::NotSubmitted)
+        .count();
+    let acceptance_unknown = offered_results
+        .iter()
+        .filter(|result| {
+            result.submission_outcome == benchmark::SubmissionOutcome::AcceptanceUnknown
+        })
+        .count();
     let submit_latencies: Vec<_> = offered_results
         .iter()
         .filter_map(|result| result.submit_latency_ms)
@@ -377,13 +403,23 @@ pub async fn run(
                     || result.error_code.as_deref() == Some("server_job_failed"))
         })
         .count();
-    let outstanding = accepted.saturating_sub(completed);
+    let accepted_outstanding = accepted - completed;
+    let outstanding = accepted_outstanding + acceptance_unknown;
     let offered = offered_results.len();
+    let submission_attempted = offered - not_submitted;
     let client_skipped_or_late = results
         .iter()
         .filter(|result| !result.offered && result.skip_reason != Some("total_upload_byte_limit"))
         .count();
     let offered_per_second = offered as f64 / schedule.window.as_secs_f64();
+    let timing = submission_timing(
+        results.iter().filter_map(|occurrence| {
+            let started = occurrence.result.as_ref()?.submission_started_offset?;
+            let scheduled = schedule.arrivals[occurrence.sequence as usize].offset;
+            Some((scheduled, started))
+        }),
+        schedule.window,
+    );
     Ok(ArrivalReport {
         schema_version: "ocr-arrival-benchmark/1.0.0",
         run_id,
@@ -400,17 +436,29 @@ pub async fn run(
         elapsed_seconds,
         scheduled: schedule.arrivals.len(),
         offered,
+        submission_attempted,
         accepted,
-        rejected: offered.saturating_sub(accepted),
+        rejected,
+        not_submitted,
+        acceptance_unknown,
         completed,
         succeeded,
         failed,
         timed_out,
         outstanding,
+        accepted_outstanding,
         client_skipped_or_late,
         upload_budget_skipped,
         source_bytes_budgeted,
         offered_per_second,
+        submission_attempts_per_second: submission_attempted as f64 / schedule.window.as_secs_f64(),
+        submission_starts_in_window: timing.in_window,
+        submission_starts_after_window: timing.after_window,
+        submission_starts_in_window_per_second: timing.in_window as f64
+            / schedule.window.as_secs_f64(),
+        submission_scheduling_lag_samples: timing.scheduling_lags_ms.len(),
+        submission_scheduling_lag_p50_ms: benchmark::percentile(&timing.scheduling_lags_ms, 0.50),
+        submission_scheduling_lag_p95_ms: benchmark::percentile(&timing.scheduling_lags_ms, 0.95),
         scheduler_lag_p50_ms: benchmark::percentile(&scheduler_lags, 0.50),
         scheduler_lag_p95_ms: benchmark::percentile(&scheduler_lags, 0.95),
         submission_latency_samples: submit_latencies.len(),
@@ -440,10 +488,36 @@ pub async fn run(
         limitations: vec![
             "Repeated occurrences of a corpus source are workload repetitions, not independent quality samples.".into(),
             "W/R are operator-declared metadata; this runner neither verifies nor changes runtime concurrency.".into(),
-            "Accepted jobs may continue after a client timeout; inspect private job IDs and drain them before another run.".into(),
+            "Accepted or acceptance-unknown submissions may continue after client failure. Reconcile private job IDs/idempotency keys and drain server work before another run; this runner never retries submission.".into(),
             "A capped offer rate or client-skipped occurrence is not evidence that the requested target rate was achieved.".into(),
+            "Submission timing records the monotonic handoff to the HTTP client, not server receipt. Only starts before the schedule window ends contribute to submission_starts_in_window_per_second; normalized legacy rates may include later starts.".into(),
         ],
     })
+}
+
+#[derive(Default)]
+struct SubmissionTiming {
+    in_window: usize,
+    after_window: usize,
+    scheduling_lags_ms: Vec<f64>,
+}
+
+fn submission_timing(
+    attempts: impl IntoIterator<Item = (Duration, Duration)>,
+    window: Duration,
+) -> SubmissionTiming {
+    let mut timing = SubmissionTiming::default();
+    for (scheduled, started) in attempts {
+        if started < window {
+            timing.in_window += 1;
+        } else {
+            timing.after_window += 1;
+        }
+        timing
+            .scheduling_lags_ms
+            .push(started.saturating_sub(scheduled).as_secs_f64() * 1000.0);
+    }
+    timing
 }
 
 #[cfg(test)]
@@ -512,5 +586,75 @@ mod tests {
             ArrivalConfig::new(ArrivalPattern::FixedRate, 1.0, 10, 10_001, 1024, 1, 1).is_err()
         );
         assert!(ArrivalConfig::new(ArrivalPattern::FixedRate, 1.0, 10, 10, 1024, 5, 1).is_err());
+    }
+
+    #[test]
+    fn poisson_random_endpoints_are_strictly_inside_the_unit_interval() {
+        for (seed, expected) in [
+            (0, f64::EPSILON / 2.0),
+            (7_650_297_886_450_228_676, 1.0 - f64::EPSILON / 2.0),
+        ] {
+            let value = SeededRandom(seed).unit_interval();
+            assert_eq!(value, expected);
+            assert!(value > 0.0 && value < 1.0);
+            let interval = next_interval(
+                ArrivalPattern::SeededPoisson,
+                0.001,
+                &mut SeededRandom(seed),
+            );
+            assert!(!interval.is_zero());
+            assert!(interval < Duration::from_secs(36_737));
+        }
+    }
+
+    #[test]
+    fn minimum_valid_poisson_rate_is_bounded_and_tiny_rates_are_rejected() {
+        assert!(
+            ArrivalConfig::new(ArrivalPattern::SeededPoisson, 1e-300, 1, 1, 1024, 1, 1).is_err()
+        );
+        let config = ArrivalConfig::new(
+            ArrivalPattern::SeededPoisson,
+            0.001,
+            86_400,
+            10_000,
+            1024,
+            1,
+            7_650_297_886_450_228_676,
+        )
+        .unwrap();
+        let schedule = config.schedule();
+        assert_eq!(schedule.window, config.duration);
+        assert!(schedule.arrivals.len() < config.max_jobs);
+        assert!(
+            schedule
+                .arrivals
+                .iter()
+                .all(|arrival| arrival.offset < config.duration)
+        );
+    }
+
+    #[test]
+    fn submission_window_end_is_exclusive_and_lag_uses_actual_start() {
+        let window = Duration::from_secs(1);
+        let scheduled = Duration::from_millis(900);
+        let timing = submission_timing(
+            [
+                (Duration::ZERO, Duration::ZERO),
+                (scheduled, window - Duration::from_nanos(1)),
+                (scheduled, window),
+                (scheduled, window + Duration::from_nanos(1)),
+            ],
+            window,
+        );
+        assert_eq!(timing.in_window, 2);
+        assert_eq!(timing.after_window, 2);
+        assert_eq!(timing.scheduling_lags_ms.len(), 4);
+        assert_eq!(timing.scheduling_lags_ms[0], 0.0);
+        assert_eq!(timing.scheduling_lags_ms[2], 100.0);
+        assert!(timing.scheduling_lags_ms[1] < 100.0);
+        assert!(timing.scheduling_lags_ms[3] > 100.0);
+        let empty = submission_timing([], window);
+        assert_eq!(empty.in_window + empty.after_window, 0);
+        assert!(empty.scheduling_lags_ms.is_empty());
     }
 }

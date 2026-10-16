@@ -72,6 +72,11 @@ impl BenchmarkConfig {
 pub struct BenchmarkDocument {
     pub document_id: String,
     pub accepted: bool,
+    pub submission_outcome: SubmissionOutcome,
+    pub idempotency_key: Option<String>,
+    pub submission_started_offset_ms: Option<f64>,
+    #[serde(skip_serializing)]
+    pub(crate) submission_started_offset: Option<Duration>,
     pub job_id: Option<Uuid>,
     pub status: String,
     pub latency_ms: f64,
@@ -82,6 +87,15 @@ pub struct BenchmarkDocument {
     pub attempts: Option<i32>,
     pub status_polls: u64,
     pub error_code: Option<String>,
+}
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SubmissionOutcome {
+    #[default]
+    NotSubmitted,
+    AcceptanceUnknown,
+    Rejected,
+    Accepted,
 }
 #[derive(Debug, Serialize)]
 pub struct BenchmarkReport {
@@ -97,6 +111,13 @@ pub struct BenchmarkReport {
     pub extraction_profile: String,
     pub elapsed_seconds: f64,
     pub submitted: usize,
+    pub submission_attempted: usize,
+    pub rejected: usize,
+    pub not_submitted: usize,
+    pub acceptance_unknown: usize,
+    pub completed: usize,
+    pub accepted_outstanding: usize,
+    pub outstanding: usize,
     pub succeeded: usize,
     pub failed: usize,
     pub documents_per_minute: f64,
@@ -123,6 +144,7 @@ pub async fn run(
                 config,
                 Occurrence {
                     run_id,
+                    run_started: started,
                     sequence: None,
                     expected_source_size: None,
                 },
@@ -140,17 +162,41 @@ pub async fn run(
         .collect();
     let succeeded = latencies.len();
     let submitted = results.iter().filter(|d| d.accepted).count();
+    let rejected = results
+        .iter()
+        .filter(|result| result.submission_outcome == SubmissionOutcome::Rejected)
+        .count();
+    let not_submitted = results
+        .iter()
+        .filter(|result| result.submission_outcome == SubmissionOutcome::NotSubmitted)
+        .count();
+    let acceptance_unknown = results
+        .iter()
+        .filter(|result| result.submission_outcome == SubmissionOutcome::AcceptanceUnknown)
+        .count();
+    let completed = results
+        .iter()
+        .filter(|result| {
+            result.accepted
+                && (result.status == "succeeded"
+                    || result.error_code.as_deref() == Some("server_job_failed"))
+        })
+        .count();
+    let accepted_outstanding = submitted - completed;
     Ok(BenchmarkReport {
         schema_version: "ocr-benchmark/1.0.0".into(), run_id,
         dataset_name: dataset.manifest.dataset_name.clone(), synthetic: dataset.manifest.synthetic, split,
         clients: config.clients, declared_worker_concurrency: config.declared_worker_concurrency,
         declared_region_concurrency: config.declared_region_concurrency, runtime_configuration_verified: false,
         extraction_profile: config.extraction_profile.clone(), elapsed_seconds: elapsed, submitted,
+        submission_attempted: results.len() - not_submitted,
+        rejected, not_submitted, acceptance_unknown, completed, accepted_outstanding,
+        outstanding: accepted_outstanding + acceptance_unknown,
         succeeded, failed: results.len() - succeeded,
         documents_per_minute: if elapsed > 0.0 { succeeded as f64 * 60.0 / elapsed } else { 0.0 },
         success_latency_p50_ms: percentile(&latencies, 0.50), success_latency_p95_ms: percentile(&latencies, 0.95),
         documents: results,
-        limitations: vec!["W/R are operator-declared run metadata; this client neither verifies nor changes runtime concurrency.".into(), "Latency includes source-file loading, upload, queueing, processing and compact status polling; successful latency excludes failed/timed-out documents.".into(), "Timeout/cancellation stops client waiting; already accepted durable server jobs continue and may overlap a later run.".into(), "Polling resolution is 500ms; this runner does not measure GPU utilization, server RSS or OCR correctness.".into()],
+        limitations: vec!["W/R are operator-declared run metadata; this client neither verifies nor changes runtime concurrency.".into(), "Latency includes source-file loading, upload, queueing, processing and compact status polling; successful latency excludes failed/timed-out documents.".into(), "Timeout/cancellation stops client waiting; accepted or acceptance-unknown submissions require reconciliation and server drain before another run. Private idempotency keys are retained; this runner never retries submission.".into(), "Polling resolution is 500ms; this runner does not measure GPU utilization, server RSS or OCR correctness.".into()],
     })
 }
 
@@ -191,7 +237,13 @@ pub(crate) async fn execute_document(
     };
     BenchmarkDocument {
         document_id: document.id.clone(),
-        accepted: progress.accepted,
+        accepted: progress.submission_outcome == SubmissionOutcome::Accepted,
+        submission_outcome: progress.submission_outcome,
+        idempotency_key: progress.idempotency_key,
+        submission_started_offset_ms: progress
+            .submission_started_offset
+            .map(|offset| offset.as_secs_f64() * 1000.0),
+        submission_started_offset: progress.submission_started_offset,
         job_id: progress.job_id,
         status,
         latency_ms: started.elapsed().as_secs_f64() * 1000.0,
@@ -214,7 +266,9 @@ struct Status {
 #[derive(Default)]
 struct Progress {
     polls: u64,
-    accepted: bool,
+    submission_outcome: SubmissionOutcome,
+    idempotency_key: Option<String>,
+    submission_started_offset: Option<Duration>,
     job_id: Option<Uuid>,
     submit_latency_ms: Option<f64>,
     accepted_at: Option<Instant>,
@@ -224,6 +278,7 @@ struct Progress {
 #[derive(Clone, Copy)]
 pub(crate) struct Occurrence {
     pub run_id: Uuid,
+    pub run_started: Instant,
     pub sequence: Option<u64>,
     pub expected_source_size: Option<u64>,
 }
@@ -239,6 +294,7 @@ async fn execute(
     let submission_started = Instant::now();
     let Occurrence {
         run_id,
+        run_started,
         sequence,
         expected_source_size,
     } = occurrence;
@@ -285,7 +341,7 @@ async fn execute(
         Some(sequence) => format!("bench-{run_id}-{sequence}-{source_fingerprint}"),
         None => format!("bench-{run_id}-{source_fingerprint}"),
     };
-    let response = client
+    let request = client
         .post(
             config
                 .base_url
@@ -293,15 +349,22 @@ async fn execute(
                 .expect("fixed relative URL"),
         )
         .bearer_auth(&config.token)
-        .header("Idempotency-Key", key)
-        .multipart(form)
+        .header("Idempotency-Key", key.as_str())
+        .multipart(form);
+    progress.idempotency_key = Some(key);
+    progress.submission_outcome = SubmissionOutcome::AcceptanceUnknown;
+    progress.submission_started_offset = Some(run_started.elapsed());
+    let response = request
         .send()
         .await
         .map_err(|_| "submit_transport_failed")?;
     if response.status() != StatusCode::ACCEPTED {
+        if response.status().is_client_error() && response.status() != StatusCode::REQUEST_TIMEOUT {
+            progress.submission_outcome = SubmissionOutcome::Rejected;
+        }
         return Err(format!("submit_http_{}", response.status().as_u16()));
     }
-    progress.accepted = true;
+    progress.submission_outcome = SubmissionOutcome::Accepted;
     let accepted_at = Instant::now();
     progress.accepted_at = Some(accepted_at);
     progress.submit_latency_ms = Some(submission_started.elapsed().as_secs_f64() * 1000.0);
@@ -412,5 +475,61 @@ mod tests {
         assert_eq!(percentile(&[], 0.95), None);
         assert_eq!(percentile(&[10.0, 40.0, 20.0, 30.0], 0.50), Some(20.0));
         assert_eq!(percentile(&[10.0, 40.0, 20.0, 30.0], 0.95), Some(40.0));
+    }
+
+    #[tokio::test]
+    async fn submission_start_uses_shared_past_origin_after_source_preflight() {
+        let directory = tempfile::tempdir().unwrap();
+        let source = b"%PDF-1.4\nSynthetic submission timing fixture\n";
+        std::fs::write(directory.path().join("source.pdf"), source).unwrap();
+        let manifest = serde_json::json!({
+            "schema_version": "ocr-eval-manifest/1.0.0",
+            "dataset_name": "synthetic-submission-timing",
+            "synthetic": true,
+            "documents": [{
+                "id": "case", "split": "test", "group_id": "group",
+                "source_sha256": crate::digest(source), "source_path": "source.pdf"
+            }]
+        });
+        let path = directory.path().join("manifest.json");
+        std::fs::write(&path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+        let dataset = Dataset::load(&path).unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let (socket, _) = tokio::time::timeout(Duration::from_secs(5), listener.accept())
+                .await
+                .unwrap()
+                .unwrap();
+            drop(socket);
+        });
+        let config =
+            BenchmarkConfig::new(&base, 1, 5, 1, 1, "none".into(), "t".repeat(32)).unwrap();
+        let origin = Instant::now().checked_sub(Duration::from_secs(10)).unwrap();
+        let result = execute_document(
+            &build_client(&config).unwrap(),
+            &dataset,
+            &dataset.manifest.documents[0],
+            &config,
+            Occurrence {
+                run_id: Uuid::new_v4(),
+                run_started: origin,
+                sequence: None,
+                expected_source_size: None,
+            },
+        )
+        .await;
+        server.await.unwrap();
+        let offset = result.submission_started_offset.unwrap();
+        assert!(offset >= Duration::from_secs(10));
+        assert!(offset <= origin.elapsed());
+        assert_eq!(
+            result.submission_started_offset_ms,
+            Some(offset.as_secs_f64() * 1000.0)
+        );
+        assert_eq!(
+            result.submission_outcome,
+            SubmissionOutcome::AcceptanceUnknown
+        );
     }
 }

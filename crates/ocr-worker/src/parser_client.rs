@@ -279,28 +279,32 @@ pub async fn health_check(
     socket_path: &Path,
     budget: Duration,
 ) -> Result<ParserCapacity, ProcessingError> {
-    let cancelled = CancellationToken::new();
-    let mut stream = connect(socket_path, budget, &cancelled).await?;
-    let frame = exchange(
-        &mut stream,
-        Operation::HealthCheck,
-        Vec::new(),
-        budget,
-        &cancelled,
-        REQUEST_DATA_LIMIT,
-    )
+    timeout(budget, async {
+        let cancelled = CancellationToken::new();
+        let mut stream = connect(socket_path, budget, &cancelled).await?;
+        let frame = exchange(
+            &mut stream,
+            Operation::HealthCheck,
+            Vec::new(),
+            budget,
+            &cancelled,
+            REQUEST_DATA_LIMIT,
+        )
+        .await
+        .and_then(operation_result)?;
+        match frame.operation {
+            Operation::HealthReady {
+                max_sessions,
+                active_sessions,
+            } if max_sessions > 0 && active_sessions <= max_sessions => Ok(ParserCapacity {
+                max_sessions,
+                active_sessions,
+            }),
+            _ => Err(unexpected_response()),
+        }
+    })
     .await
-    .and_then(operation_result)?;
-    match frame.operation {
-        Operation::HealthReady {
-            max_sessions,
-            active_sessions,
-        } if max_sessions > 0 && active_sessions <= max_sessions => Ok(ParserCapacity {
-            max_sessions,
-            active_sessions,
-        }),
-        _ => Err(unexpected_response()),
-    }
+    .map_err(|_| ProcessingError::transient("isolated parser operation timed out"))?
 }
 
 /// Busy is the parser's normal backpressure, so admission waits within the
@@ -375,7 +379,7 @@ async fn exchange(
         write_frame(stream, FrameKind::Request, &request, data_limit)
             .await
             .map_err(protocol_error)?;
-        read_frame(stream, FrameKind::Response, RESPONSE_DATA_LIMIT)
+        read_frame(stream, FrameKind::Response, 0)
             .await
             .map_err(protocol_error)
     };
@@ -434,9 +438,221 @@ mod tests {
     use std::os::unix::fs::PermissionsExt;
 
     use tempfile::TempDir;
-    use tokio::{net::UnixListener, task::JoinHandle};
+    use tokio::{io::AsyncWriteExt, net::UnixListener, sync::oneshot, task::JoinHandle};
 
     use super::*;
+    use crate::parser_protocol::PROTOCOL_VERSION;
+
+    #[tokio::test]
+    async fn control_responses_reject_payloads_before_reading_metadata() {
+        for operation in [
+            Operation::HealthCheck,
+            Operation::Open {
+                media_type: "application/pdf".into(),
+                max_pages: 1,
+                max_pixels: 4000,
+                max_image_edge: 40,
+                render_dpi: 144,
+                page_max_edge: 40,
+                timeout_seconds: 1,
+                session_timeout_seconds: 30,
+            },
+            Operation::Upload,
+        ] {
+            for data_length in [1_u64, 3, RESPONSE_DATA_LIMIT, u64::MAX] {
+                let (mut client, mut server) = UnixStream::pair().unwrap();
+                let expected_operation = operation.clone();
+                let (release, held_open) = oneshot::channel();
+                let helper = tokio::spawn(async move {
+                    let request = read_frame(&mut server, FrameKind::Request, REQUEST_DATA_LIMIT)
+                        .await
+                        .unwrap();
+                    assert_eq!(request.operation, expected_operation);
+                    let mut header = Vec::from(*b"OCRP");
+                    header.extend_from_slice(&PROTOCOL_VERSION.to_be_bytes());
+                    header.extend_from_slice(&(FrameKind::Response as u16).to_be_bytes());
+                    header.extend_from_slice(&1_u32.to_be_bytes());
+                    header.extend_from_slice(&data_length.to_be_bytes());
+                    server.write_all(&header).await.unwrap();
+                    held_open.await.unwrap();
+                });
+                let data = if operation == Operation::Upload {
+                    vec![1]
+                } else {
+                    Vec::new()
+                };
+                let result = exchange(
+                    &mut client,
+                    operation.clone(),
+                    data,
+                    Duration::from_secs(1),
+                    &CancellationToken::new(),
+                    REQUEST_DATA_LIMIT,
+                )
+                .await;
+                release.send(()).unwrap();
+                helper.await.unwrap();
+                let error = result.unwrap_err();
+                assert!(error.retryable);
+                assert_eq!(error.message, "isolated parser IPC failed");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn health_validates_capacity_and_rejects_unexpected_operations() {
+        for (operation, expected) in [
+            (
+                Operation::HealthReady {
+                    max_sessions: 1,
+                    active_sessions: 0,
+                },
+                Ok(ParserCapacity {
+                    max_sessions: 1,
+                    active_sessions: 0,
+                }),
+            ),
+            (
+                Operation::HealthReady {
+                    max_sessions: 1,
+                    active_sessions: 1,
+                },
+                Ok(ParserCapacity {
+                    max_sessions: 1,
+                    active_sessions: 1,
+                }),
+            ),
+            (
+                Operation::HealthReady {
+                    max_sessions: 0,
+                    active_sessions: 0,
+                },
+                Err("isolated parser returned an invalid response"),
+            ),
+            (
+                Operation::HealthReady {
+                    max_sessions: 1,
+                    active_sessions: 2,
+                },
+                Err("isolated parser returned an invalid response"),
+            ),
+            (
+                Operation::Admitted,
+                Err("isolated parser returned an invalid response"),
+            ),
+            (
+                Operation::NativeTextResult,
+                Err("isolated parser returned an invalid response"),
+            ),
+            (
+                Operation::RgbResult {
+                    width: 1,
+                    height: 1,
+                },
+                Err("isolated parser IPC failed"),
+            ),
+            (
+                Operation::Error {
+                    code: ErrorCode::Busy,
+                },
+                Err("isolated parser is at capacity"),
+            ),
+        ] {
+            let directory = tempfile::tempdir().unwrap();
+            let socket_path = directory.path().join("health.sock");
+            let listener = UnixListener::bind(&socket_path).unwrap();
+            let helper = tokio::spawn(async move {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let request = read_frame(&mut stream, FrameKind::Request, 0)
+                    .await
+                    .unwrap();
+                assert_eq!(request.operation, Operation::HealthCheck);
+                let data = if matches!(operation, Operation::RgbResult { .. }) {
+                    vec![255; 3]
+                } else {
+                    Vec::new()
+                };
+                write_frame(
+                    &mut stream,
+                    FrameKind::Response,
+                    &Frame { operation, data },
+                    RESPONSE_DATA_LIMIT,
+                )
+                .await
+                .unwrap();
+            });
+            let result = health_check(&socket_path, Duration::from_secs(1)).await;
+            helper.await.unwrap();
+            match expected {
+                Ok(capacity) => assert_eq!(result.unwrap(), capacity),
+                Err(message) => {
+                    let error = result.unwrap_err();
+                    assert!(error.retryable);
+                    assert_eq!(error.message, message);
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn health_stalled_reply_is_deadline_bounded_and_next_probe_recovers() {
+        let directory = tempfile::tempdir().unwrap();
+        let socket_path = directory.path().join("health.sock");
+        let listener = UnixListener::bind(&socket_path).unwrap();
+        let helper = tokio::spawn(async move {
+            let (mut stalled, _) = listener.accept().await.unwrap();
+            let request = read_frame(&mut stalled, FrameKind::Request, 0)
+                .await
+                .unwrap();
+            assert_eq!(request.operation, Operation::HealthCheck);
+            let mut closed = [0_u8; 1];
+            assert_eq!(
+                tokio::io::AsyncReadExt::read(&mut stalled, &mut closed)
+                    .await
+                    .unwrap(),
+                0
+            );
+            let (mut recovered, _) = listener.accept().await.unwrap();
+            let request = read_frame(&mut recovered, FrameKind::Request, 0)
+                .await
+                .unwrap();
+            assert_eq!(request.operation, Operation::HealthCheck);
+            write_frame(
+                &mut recovered,
+                FrameKind::Response,
+                &Frame {
+                    operation: Operation::HealthReady {
+                        max_sessions: 1,
+                        active_sessions: 0,
+                    },
+                    data: Vec::new(),
+                },
+                0,
+            )
+            .await
+            .unwrap();
+        });
+        timeout(Duration::from_secs(2), async {
+            let error = health_check(&socket_path, Duration::from_millis(100))
+                .await
+                .unwrap_err();
+            assert!(error.retryable);
+            assert_eq!(error.message, "isolated parser operation timed out");
+            let capacity = health_check(&socket_path, Duration::from_secs(1))
+                .await
+                .unwrap();
+            assert_eq!(
+                capacity,
+                ParserCapacity {
+                    max_sessions: 1,
+                    active_sessions: 0,
+                }
+            );
+            helper.await.unwrap();
+        })
+        .await
+        .expect("health timeout must close its socket and allow a fresh probe");
+    }
 
     async fn malicious_session(
         requested: Operation,

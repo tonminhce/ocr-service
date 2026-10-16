@@ -13,7 +13,10 @@ use sha2::{Digest, Sha256};
 use tokio::sync::Semaphore;
 use tokio_util::sync::CancellationToken;
 
-use crate::ProcessingError;
+use crate::{
+    ProcessingError,
+    json_budget::{JsonBudgetError, serialized_bytes},
+};
 
 const MAX_BLOCKS: usize = 10_000;
 const MAX_TEXT_BYTES: usize = 4 * 1024 * 1024;
@@ -88,15 +91,12 @@ pub async fn apply(
         )?;
         complete["post_processing"] = post_processing;
         complete["extraction"] = extraction;
-        if serde_json::to_vec(&complete)
-            .map_err(|_| ProcessingError::permanent("cannot serialize extraction result"))?
-            .len()
-            > 16 * 1024 * 1024
-        {
-            return Err(ProcessingError::permanent(
-                "extraction result exceeds the 16 MiB storage budget",
-            ));
-        }
+        serialized_bytes(&complete, 16 * 1024 * 1024).map_err(|error| {
+            ProcessingError::permanent(match error {
+                JsonBudgetError::Limit => "extraction result exceeds the 16 MiB storage budget",
+                JsonBudgetError::Serialization => "cannot serialize extraction result",
+            })
+        })?;
         Ok(complete)
     })
     .await
@@ -702,6 +702,26 @@ mod tests {
             )
             .await
             .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn extraction_result_budget_includes_preserved_raw_fields() {
+        let mut result = json!({"pages": [], "raw_padding": "x".repeat(16 * 1024 * 1024)});
+        let error = apply(
+            &mut result,
+            "image/png",
+            "vi_rental_contract_v1",
+            None,
+            "a".repeat(64),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap_err();
+        assert!(!error.retryable);
+        assert_eq!(
+            error.message,
+            "extraction result exceeds the 16 MiB storage budget"
         );
     }
 

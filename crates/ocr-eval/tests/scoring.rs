@@ -262,6 +262,88 @@ fn evidence_structure_does_not_imply_manual_correctness_and_empty_metrics_stay_n
     assert_eq!(report.fields["deposit_amount"].precision, None);
     assert_eq!(report.fields["deposit_amount"].recall, None);
 }
+
+#[test]
+fn cli_manifest_decoding_errors_do_not_expose_private_values_or_field_names() {
+    let sentinel = "synthetic-private-value-never-log";
+    for mutation in 0..3 {
+        let directory = tempfile::tempdir().unwrap();
+        let manifest = support::fixture_files(directory.path());
+        let mut value = serde_json::to_value(&manifest).unwrap();
+        match mutation {
+            0 => value["documents"][0]["split"] = serde_json::json!(sentinel),
+            1 => value[sentinel] = serde_json::json!(true),
+            _ => {
+                value["documents"][2]["labels"]["monthly_rent"]["state"] =
+                    serde_json::json!(sentinel);
+            }
+        }
+        let path = directory.path().join("manifest.json");
+        std::fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
+        let output = std::process::Command::new(env!("CARGO_BIN_EXE_ocr-eval"))
+            .args(["score", path.to_str().unwrap(), "--split", "test"])
+            .output()
+            .unwrap();
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(!output.status.success());
+        assert!(output.stdout.is_empty());
+        assert!(stderr.contains("manifest JSON is invalid"));
+        assert!(!stderr.contains(sentinel));
+        assert!(!stderr.contains("Caused by:"));
+    }
+}
+
+#[test]
+fn cli_and_library_result_decoding_errors_discard_private_serde_sources() {
+    let sentinel = "synthetic-private-value-never-log";
+    let mut business = serde_json::to_value(support::business()).unwrap();
+    business["fields"]["monthly_rent"]["state"] = serde_json::json!(sentinel);
+    let extraction = serde_json::json!({
+        "schema_version": ocr_extraction::SCHEMA_VERSION,
+        "fields": {"monthly_rent": {"state": sentinel}}
+    });
+    let extraction_error = "expected extraction, OCR result, API job or business result";
+    let payloads = [
+        (
+            format!(r#"{{"{sentinel}":"\q"}}"#).into_bytes(),
+            "result JSON is invalid",
+        ),
+        (
+            serde_json::to_vec(&business).unwrap(),
+            "business result is malformed",
+        ),
+        (serde_json::to_vec(&extraction).unwrap(), extraction_error),
+        (
+            serde_json::to_vec(&serde_json::json!({"extraction": extraction})).unwrap(),
+            extraction_error,
+        ),
+        (
+            serde_json::to_vec(&serde_json::json!({"result": {"extraction": extraction}})).unwrap(),
+            extraction_error,
+        ),
+    ];
+    for (payload, expected_message) in payloads {
+        let error = load_business(&payload).unwrap_err();
+        assert_eq!(error.to_string(), expected_message);
+        assert_eq!(error.chain().count(), 1);
+        assert!(!format!("{error:?}").contains(sentinel));
+        let directory = tempfile::tempdir().unwrap();
+        let manifest = support::fixture_files(directory.path());
+        std::fs::write(directory.path().join("business.json"), &payload).unwrap();
+        let path = support::save(directory.path(), &manifest);
+        let output = std::process::Command::new(env!("CARGO_BIN_EXE_ocr-eval"))
+            .args(["score", path.to_str().unwrap(), "--split", "test"])
+            .output()
+            .unwrap();
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(!output.status.success());
+        assert!(output.stdout.is_empty());
+        assert!(stderr.contains(expected_message));
+        assert!(!stderr.contains(sentinel));
+        assert!(!stderr.contains("Caused by:"));
+    }
+}
+
 trait ErrorMessage {
     fn unwrap_err_message(self) -> String;
 }

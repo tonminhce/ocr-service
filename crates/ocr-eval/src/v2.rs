@@ -709,6 +709,12 @@ fn validate_graph(
             _ => !obs.is_empty() && obs.iter().all(|o| Some(o.state) == expected),
         };
         ensure!(shape, "field state/candidate shape inconsistent");
+        if prediction && f.state == State::Found {
+            ensure!(
+                obs.iter().any(|o| o.origin == Origin::FirstPass),
+                "found prediction requires first-pass support"
+            );
+        }
         ensure!(
             (f.state == State::Ambiguous) == f.ambiguity_reason.is_some(),
             "ambiguity reason/state inconsistent"

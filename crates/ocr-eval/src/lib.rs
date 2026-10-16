@@ -97,7 +97,7 @@ impl Dataset {
             .context("manifest has no parent directory")?
             .to_path_buf();
         let manifest: Manifest = serde_json::from_slice(&read_bounded(&path, MAX_MANIFEST_BYTES)?)
-            .context("manifest JSON is invalid")?;
+            .map_err(|_| anyhow::anyhow!("manifest JSON is invalid"))?;
         ensure!(
             manifest.schema_version == "ocr-eval-manifest/1.0.0",
             "unsupported manifest schema"
@@ -242,7 +242,8 @@ impl Dataset {
             document.result_sha256.as_deref() == Some(digest(&bytes).as_str()),
             "prediction artifact hash mismatch"
         );
-        let value: serde_json::Value = serde_json::from_slice(&bytes)?;
+        let value: serde_json::Value = serde_json::from_slice(&bytes)
+            .map_err(|_| anyhow::anyhow!("result JSON is invalid"))?;
         for source_hash in [
             value.get("sha256"),
             value.get("source_sha256"),
@@ -451,18 +452,21 @@ pub fn load_business(bytes: &[u8]) -> Result<BusinessResult> {
         "result exceeds byte budget"
     );
     let value: serde_json::Value =
-        serde_json::from_slice(bytes).context("result JSON is invalid")?;
+        serde_json::from_slice(bytes).map_err(|_| anyhow::anyhow!("result JSON is invalid"))?;
     let business =
         if value.get("schema_version").and_then(|v| v.as_str()) == Some("ocr-business/1.0.0") {
-            serde_json::from_value(value).context("business result is malformed")?
+            serde_json::from_value(value)
+                .map_err(|_| anyhow::anyhow!("business result is malformed"))?
         } else {
             let extraction = value
                 .get("result")
                 .and_then(|r| r.get("extraction"))
                 .or_else(|| value.get("extraction"))
                 .unwrap_or(&value);
-            let extraction: ExtractionResult = serde_json::from_value(extraction.clone())
-                .context("expected extraction, OCR result, API job or business result")?;
+            let extraction: ExtractionResult =
+                serde_json::from_value(extraction.clone()).map_err(|_| {
+                    anyhow::anyhow!("expected extraction, OCR result, API job or business result")
+                })?;
             ensure!(
                 extraction.schema_version == ocr_extraction::SCHEMA_VERSION,
                 "unsupported extraction schema"

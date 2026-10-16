@@ -201,6 +201,12 @@ outputs. Stop on swap growth, memory events, or non-plateau behavior.
 
 ## 3. Simultaneous live buffers and hidden bounds
 
+Subsequent local work removed the size-only full-result JSON buffers identified below and reused bounded counting for layout metadata. The [execution trace](e02-json-budget-execution-trace.md) records exact-byte/error regressions and a small synthetic allocation probe. This does not replace the pending allocator A/B, representative worker/cgroup measurements or memory headroom gate. The table retains the original audit observations for traceability.
+
+A later [request-ownership increment](e02-request-memory-execution-trace.md) also removes intermediate encoding copies and releases the JSON value before HTTP waiting. Its bounded construction probe records lower retained requested bytes with unchanged construction peak; it establishes no whole-worker RSS or throughput gain.
+
+The [consuming RGB increment](e02-rgb-memory-execution-trace.md) removes the RGB→RGBA→RGB temporary copies, consumes RGBA8 directly and drops thumbnail source rasters earlier. Exact pixel/JPEG/EXIF/color-type controls and small conversion allocation measurements pass; decoder/whole-process peaks and representative headroom still require separate evidence.
+
 | Path | Allocations/lifetime that matter | Implication |
 |---|---|---|
 | [`preparation.rs:439`](../crates/ocr-worker/src/preparation.rs#L439) | Decoded image, optional thumbnail, `to_rgba8()` copy and new RGB coexist. | At 3500², RGB is 36.75 MB and RGBA is 49 MB. A consuming RGB fast path can preserve exact RGB output and avoid an RGBA pass; alpha inputs still need the current white composite. |

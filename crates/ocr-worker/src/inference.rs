@@ -22,6 +22,7 @@ use uuid::Uuid;
 use crate::{
     ProcessingError, cancelled_error,
     formatting::{LayoutResult, format_pages},
+    json_budget::{JsonBudgetError, serialized_bytes},
     layout_runner, permit_or_cancelled, preparation,
     settings::{OcrStrategy, Settings},
     telemetry::{self, CallTrace, ParsedUsage, Recorder, RunTelemetry},
@@ -289,15 +290,12 @@ impl Recognizer {
             "prompt_version": "fullpage-v1", "max_output_tokens": self.settings.max_output_tokens,
             "max_image_edge": self.settings.max_image_edge, "pages": pages, "markdown": markdown
         });
-        if serde_json::to_vec(&result)
-            .map_err(|_| ProcessingError::permanent("cannot serialize result"))?
-            .len()
-            > 16 * 1024 * 1024
-        {
-            return Err(ProcessingError::permanent(
-                "result exceeds its 16 MiB storage budget",
-            ));
-        }
+        serialized_bytes(&result, 16 * 1024 * 1024).map_err(|error| {
+            ProcessingError::permanent(match error {
+                JsonBudgetError::Limit => "result exceeds its 16 MiB storage budget",
+                JsonBudgetError::Serialization => "cannot serialize result",
+            })
+        })?;
         Ok(result)
     }
 
@@ -517,15 +515,12 @@ impl Recognizer {
                 "limitations":["Repeated recognition is not an independent truth source; alternatives require review.",
                     "Recovery targets detected text regions only; it does not establish complete page coverage."]},
             "pages":pages,"layout":layout,"markdown":markdown});
-        if serde_json::to_vec(&result)
-            .map_err(|_| ProcessingError::permanent("cannot serialize layout result"))?
-            .len()
-            > 16 * 1024 * 1024
-        {
-            return Err(ProcessingError::permanent(
-                "layout result exceeds its 16 MiB storage budget",
-            ));
-        }
+        serialized_bytes(&result, 16 * 1024 * 1024).map_err(|error| {
+            ProcessingError::permanent(match error {
+                JsonBudgetError::Limit => "layout result exceeds its 16 MiB storage budget",
+                JsonBudgetError::Serialization => "cannot serialize layout result",
+            })
+        })?;
         Ok(result)
         }).await.map_err(|_|ProcessingError::transient("formatting task failed"))?
     }
@@ -719,13 +714,22 @@ impl Recognizer {
         trace: &CallTrace,
     ) -> Result<String, ProcessingError> {
         let prompt = task_prompt(task)?;
+        let image_prefix = "data:image/jpeg;base64,";
+        let image_capacity = base64::encoded_len(jpeg.len(), true)
+            .and_then(|length| length.checked_add(image_prefix.len()))
+            .ok_or_else(|| {
+                ProcessingError::permanent("inference image exceeds encoding capacity")
+            })?;
+        let mut image_url = String::with_capacity(image_capacity);
+        image_url.push_str(image_prefix);
+        STANDARD.encode_string(jpeg, &mut image_url);
         let mut body = json!({
             "model": self.settings.vllm_model,
             "messages": [
                 {"role": "system", "content": SYSTEM_PROMPT},
                 {"role": "user", "content": [
                     {"type": "text", "text": prompt},
-                    {"type": "image_url", "image_url": {"url": format!("data:image/jpeg;base64,{}", STANDARD.encode(jpeg))}}
+                    {"type": "image_url", "image_url": {"url": null}}
                 ]}
             ],
             "temperature": 0,
@@ -733,15 +737,15 @@ impl Recognizer {
             "stream": false,
             "chat_template_kwargs": {"enable_thinking": false}
         });
+        body["messages"][1]["content"][1]["image_url"]["url"] = Value::String(image_url);
         if task.is_some() {
             body["top_p"] = json!(0.00001);
             body["top_k"] = json!(1);
             body["repetition_penalty"] = json!(1.1);
         }
-        let response = self
-            .client
-            .post(&self.endpoint)
-            .json(&body)
+        let request = self.client.post(&self.endpoint).json(&body);
+        drop(body);
+        let response = request
             .send()
             .await
             .map_err(|_| ProcessingError::transient("inference connection failed or timed out"))?;
@@ -840,27 +844,9 @@ fn layout_metadata_bytes(
     layout: &ocr_layout::PageLayout,
     limit: usize,
 ) -> Result<usize, ProcessingError> {
-    struct Counter {
-        limit: usize,
-        bytes: usize,
-    }
-    impl std::io::Write for Counter {
-        fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
-            if buffer.len() > self.limit.saturating_sub(self.bytes) {
-                return Err(std::io::Error::other("layout metadata budget exceeded"));
-            }
-            self.bytes += buffer.len();
-            Ok(buffer.len())
-        }
-        fn flush(&mut self) -> std::io::Result<()> {
-            Ok(())
-        }
-    }
-    let mut counter = Counter { limit, bytes: 0 };
-    serde_json::to_writer(&mut counter, layout).map_err(|_| {
+    serialized_bytes(layout, limit).map_err(|_| {
         ProcessingError::permanent("document layout metadata exceeds the cumulative 4 MiB budget")
-    })?;
-    Ok(counter.bytes)
+    })
 }
 
 fn expanded_recovery_region(region: &Region, width: u32, height: u32, pixels: u32) -> Region {

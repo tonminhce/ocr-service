@@ -7,6 +7,7 @@ mod child_process;
 mod extraction_validation;
 pub mod formatting;
 pub mod inference;
+mod json_budget;
 pub mod layout_runner;
 pub mod observer;
 pub mod parser_client;

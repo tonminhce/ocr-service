@@ -148,6 +148,10 @@ jobs:
             trivy image --quiet --exit-code 1 --ignore-unfixed --severity CRITICAL "$image"
           done
           docker image inspect --format '{{index .RepoTags 0}} {{.Id}}' "ocr-service:${{ github.sha }}" "ocr-service:parser-${{ github.sha }}" "ocr-service:backup-${{ github.sha }}" | tee release/image-ids.txt
+      - name: Load runtime images for local inventory
+        run: |
+          docker pull postgres:18
+          docker pull redis:8.2-alpine@sha256:b51665e66f00759be7c3152ad5ac3c66fb2f619c13ef62dea7cc1f9914524635
       - name: Local release inventory and digest lock
         run: |
           python3 scripts/release-manifest.py \
@@ -163,6 +167,14 @@ jobs:
           PROD_PARSER_IMAGE: ocr-service:parser-${{ github.sha }}
           SMOKE_OUTPUT_DIR: ${{ runner.temp }}/smoke
         run: python3 scripts/monitoring-smoke.py --app-image "$PROD_IMAGE" --parser-image "$PROD_PARSER_IMAGE" --output "$SMOKE_OUTPUT_DIR"
+      - name: Parser network and mount boundary matrix
+        timeout-minutes: 4
+        run: |
+          parser_image_id="$(docker image inspect --format '{{.Id}}' 'ocr-service:parser-${{ github.sha }}')"
+          app_image_id="$(docker image inspect --format '{{.Id}}' 'ocr-service:${{ github.sha }}')"
+          python3 scripts/parser-boundary-smoke.py \
+            --parser-image "$parser_image_id" --app-image "$app_image_id" \
+            --output "${{ runner.temp }}/parser-boundary"
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -171,3 +183,4 @@ jobs:
             release/
             ${{ runner.temp }}/smoke/*.json
             ${{ runner.temp }}/smoke/*.txt
+            ${{ runner.temp }}/parser-boundary/report.json

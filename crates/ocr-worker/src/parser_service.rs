@@ -201,7 +201,7 @@ async fn handle_connection(
     shutdown: CancellationToken,
 ) -> Result<(), ProcessingError> {
     let handshake = Instant::now() + service.frame_timeout;
-    let first = read_request(&mut stream, handshake, service.frame_timeout, &shutdown).await?;
+    let first = read_request(&mut stream, handshake, service.frame_timeout, &shutdown, 0).await?;
     match first.operation {
         Operation::HealthCheck => {
             let active = service
@@ -258,6 +258,7 @@ async fn handle_connection(
                 Instant::now() + service.frame_timeout,
                 service.frame_timeout,
                 &shutdown,
+                REQUEST_DATA_LIMIT,
             )
             .await?;
             if upload.operation != Operation::Upload {
@@ -297,6 +298,7 @@ async fn read_request(
     idle_deadline: Instant,
     frame_timeout: Duration,
     shutdown: &CancellationToken,
+    data_limit: u64,
 ) -> Result<Frame, ProcessingError> {
     let first = tokio::select! {
         biased;
@@ -310,7 +312,7 @@ async fn read_request(
     tokio::select! {
         biased;
         _ = shutdown.cancelled() => Err(ProcessingError::transient("parser service is stopping")),
-        frame = timeout(frame_timeout, read_frame(&mut reader, FrameKind::Request, REQUEST_DATA_LIMIT)) => frame
+        frame = timeout(frame_timeout, read_frame(&mut reader, FrameKind::Request, data_limit)) => frame
             .map_err(|_| ProcessingError::transient("parser IPC frame timed out"))?
             .map_err(|_| ProcessingError::transient("invalid parser IPC request frame")),
     }
@@ -334,7 +336,7 @@ async fn serve_document(
     shutdown: CancellationToken,
 ) -> Result<(), ProcessingError> {
     loop {
-        let frame = read_request(stream, deadline, service.frame_timeout, &shutdown).await?;
+        let frame = read_request(stream, deadline, service.frame_timeout, &shutdown, 0).await?;
         if !frame.data.is_empty() {
             return Err(ProcessingError::permanent(
                 "parser operation does not accept a data payload",
@@ -1017,6 +1019,95 @@ mod tests {
             .await
             .expect("stalled request must not pin a parser connection");
         assert_eq!(closed.unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn non_upload_phases_reject_declared_payloads_before_metadata_and_recover() {
+        use tokio::io::AsyncWriteExt;
+
+        let server = TestServer::start_with(ServiceLimits {
+            max_sessions: 1,
+            frame_timeout: Duration::from_secs(5),
+            ..ServiceLimits::default()
+        })
+        .await;
+        for established in [false, true] {
+            for data_length in [1_u64, REQUEST_DATA_LIMIT, u64::MAX] {
+                let mut stream = UnixStream::connect(&server.path).await.unwrap();
+                if established {
+                    write_frame(
+                        &mut stream,
+                        FrameKind::Request,
+                        &Frame {
+                            operation: Operation::Open {
+                                media_type: "image/png".into(),
+                                max_pages: 1,
+                                max_pixels: 4000,
+                                max_image_edge: 40,
+                                render_dpi: 144,
+                                page_max_edge: 40,
+                                timeout_seconds: 1,
+                                session_timeout_seconds: 30,
+                            },
+                            data: Vec::new(),
+                        },
+                        0,
+                    )
+                    .await
+                    .unwrap();
+                    assert_eq!(
+                        read_frame(&mut stream, FrameKind::Response, 0)
+                            .await
+                            .unwrap()
+                            .operation,
+                        Operation::Admitted
+                    );
+                    write_frame(
+                        &mut stream,
+                        FrameKind::Request,
+                        &Frame {
+                            operation: Operation::Upload,
+                            data: png(8, 4),
+                        },
+                        REQUEST_DATA_LIMIT,
+                    )
+                    .await
+                    .unwrap();
+                    assert_eq!(
+                        read_frame(&mut stream, FrameKind::Response, 0)
+                            .await
+                            .unwrap()
+                            .operation,
+                        Operation::Opened { pages: 1 }
+                    );
+                }
+                let mut header = Vec::from(*b"OCRP");
+                header.extend_from_slice(&crate::parser_protocol::PROTOCOL_VERSION.to_be_bytes());
+                header.extend_from_slice(&(FrameKind::Request as u16).to_be_bytes());
+                header.extend_from_slice(&1_u32.to_be_bytes());
+                header.extend_from_slice(&data_length.to_be_bytes());
+                stream.write_all(&header).await.unwrap();
+                let mut closed = [0_u8; 1];
+                assert_eq!(
+                    timeout(Duration::from_secs(1), stream.read(&mut closed))
+                        .await
+                        .expect("a non-upload phase must reject the header without its body")
+                        .unwrap(),
+                    0
+                );
+                let capacity =
+                    crate::parser_client::health_check(&server.path, Duration::from_secs(1))
+                        .await
+                        .unwrap();
+                assert_eq!((capacity.max_sessions, capacity.active_sessions), (1, 0));
+            }
+        }
+        let recovered = open_png(&server, Default::default()).await.unwrap();
+        let page = recovered
+            .render_rgb(1, RenderProfile::FullPage, CancellationToken::new())
+            .await
+            .unwrap();
+        assert_eq!(page.dimensions(), (8, 4));
     }
 
     #[tokio::test]

@@ -285,13 +285,18 @@ pub(crate) fn normalize_rgb_image(
     // scans retain the same orientation the user sees in their photo viewer.
     decoded.apply_orientation(orientation);
     let resized = if width > max_edge || height > max_edge {
-        decoded.thumbnail(max_edge, max_edge)
+        let resized = decoded.thumbnail(max_edge, max_edge);
+        drop(decoded);
+        resized
     } else {
         decoded
     };
     // Transparent backgrounds become white, so glyphs retain their document
     // appearance when sent as a JPEG to inference.
-    let rgba = resized.to_rgba8();
+    let rgba = match resized {
+        DynamicImage::ImageRgb8(rgb) => return Ok(rgb),
+        resized => resized.into_rgba8(),
+    };
     let mut rgb = RgbImage::new(rgba.width(), rgba.height());
     for (out, source) in rgb.pixels_mut().zip(rgba.pixels()) {
         let alpha = u16::from(source[3]);
@@ -752,6 +757,126 @@ pub(crate) async fn run_pdf_command(
 mod tests {
     use super::*;
     use crate::subprocess_policy::PdfTool;
+
+    fn reference_white_rgb(mut decoded: DynamicImage, max_edge: u32) -> RgbImage {
+        if decoded.width() > max_edge || decoded.height() > max_edge {
+            decoded = decoded.thumbnail(max_edge, max_edge);
+        }
+        let rgba = decoded.to_rgba8();
+        let mut rgb = RgbImage::new(rgba.width(), rgba.height());
+        for (output, source) in rgb.pixels_mut().zip(rgba.pixels()) {
+            let alpha = u16::from(source[3]);
+            for channel in 0..3 {
+                output[channel] =
+                    ((u16::from(source[channel]) * alpha + 255 * (255 - alpha) + 127) / 255) as u8;
+            }
+        }
+        rgb
+    }
+
+    #[test]
+    fn normalized_pixels_match_reference_across_supported_color_types() {
+        let fixtures = [
+            DynamicImage::ImageRgb8(RgbImage::from_fn(12, 8, |column, row| {
+                image::Rgb([
+                    (column * 19) as u8,
+                    (row * 31) as u8,
+                    ((column + row) * 11) as u8,
+                ])
+            })),
+            DynamicImage::ImageRgba8(image::RgbaImage::from_fn(12, 8, |column, row| {
+                image::Rgba([
+                    19,
+                    131,
+                    249,
+                    [0, 1, 127, 128, 254, 255][(column % 6) as usize] ^ row as u8,
+                ])
+            })),
+            DynamicImage::ImageLuma8(image::GrayImage::from_fn(12, 8, |column, row| {
+                image::Luma([((column + row) * 11) as u8])
+            })),
+            DynamicImage::ImageLumaA8(image::GrayAlphaImage::from_fn(12, 8, |column, row| {
+                image::LumaA([(column * 19) as u8, (row * 31) as u8])
+            })),
+            DynamicImage::ImageRgb16(image::ImageBuffer::from_fn(12, 8, |column, row| {
+                image::Rgb([(column * 5000) as u16, (row * 9000) as u16, u16::MAX])
+            })),
+            DynamicImage::ImageRgba16(image::ImageBuffer::from_fn(12, 8, |column, row| {
+                image::Rgba([0, 32768, 65535, ((column + row) * 3000) as u16])
+            })),
+            DynamicImage::ImageLuma16(image::ImageBuffer::from_fn(12, 8, |column, row| {
+                image::Luma([((column + row) * 3000) as u16])
+            })),
+            DynamicImage::ImageLumaA16(image::ImageBuffer::from_fn(12, 8, |column, row| {
+                image::LumaA([(column * 5000) as u16, (row * 9000) as u16])
+            })),
+        ];
+        for fixture in fixtures {
+            for format in [ImageFormat::Png, ImageFormat::Jpeg, ImageFormat::WebP] {
+                if format != ImageFormat::Png
+                    && !matches!(
+                        fixture,
+                        DynamicImage::ImageRgb8(_) | DynamicImage::ImageRgba8(_)
+                    )
+                {
+                    continue;
+                }
+                if format == ImageFormat::Jpeg && matches!(fixture, DynamicImage::ImageRgba8(_)) {
+                    continue;
+                }
+                let mut encoded = Cursor::new(Vec::new());
+                fixture.write_to(&mut encoded, format).unwrap();
+                for max_edge in [32, 7] {
+                    let decoded = image::load_from_memory(encoded.get_ref()).unwrap();
+                    let expected = reference_white_rgb(decoded, max_edge);
+                    let actual = normalize_rgb_image(encoded.get_ref(), 96, max_edge).unwrap();
+                    assert_eq!(actual, expected, "{format:?}, {max_edge}");
+                    assert_eq!(actual.color_space(), expected.color_space());
+                    assert_eq!(
+                        normalize_image(encoded.get_ref(), 96, max_edge).unwrap(),
+                        encode_jpeg(&expected, 90).unwrap()
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn all_exif_orientations_preserve_reference_pixels_before_and_after_resize() {
+        let source = RgbImage::from_fn(12, 8, |column, row| {
+            image::Rgb([
+                (column * 19) as u8,
+                (row * 31) as u8,
+                ((column + row) * 11) as u8,
+            ])
+        });
+        let jpeg = encode_jpeg(&source, 100).unwrap();
+        for exif_orientation in 1_u16..=8 {
+            let mut exif = b"Exif\0\0II\x2a\0\x08\0\0\0\x01\0\x12\x01\x03\0\x01\0\0\0".to_vec();
+            exif.extend_from_slice(&exif_orientation.to_le_bytes());
+            exif.extend_from_slice(&[0; 6]);
+            let mut encoded = jpeg[..2].to_vec();
+            encoded.extend_from_slice(&[0xff, 0xe1]);
+            encoded.extend_from_slice(&((exif.len() + 2) as u16).to_be_bytes());
+            encoded.extend_from_slice(&exif);
+            encoded.extend_from_slice(&jpeg[2..]);
+            for max_edge in [32, 7] {
+                let mut decoded = image::load_from_memory(&encoded).unwrap();
+                decoded.apply_orientation(
+                    image::metadata::Orientation::from_exif(exif_orientation as u8).unwrap(),
+                );
+                let expected = reference_white_rgb(decoded, max_edge);
+                assert_eq!(
+                    normalize_rgb_image(&encoded, 96, max_edge).unwrap(),
+                    expected
+                );
+                assert_eq!(
+                    normalize_image(&encoded, 96, max_edge).unwrap(),
+                    encode_jpeg(&expected, 90).unwrap()
+                );
+            }
+        }
+    }
 
     #[test]
     fn page_rgb_decode_bounds_dimensions_and_flattens_alpha_to_white() {
