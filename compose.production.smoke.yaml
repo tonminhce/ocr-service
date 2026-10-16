@@ -15,6 +15,8 @@ services:
     command: [mock-vllm]
     environment:
       MOCK_BIND_ADDR: 0.0.0.0:8000
+      # Imitates model latency; real Qwen pages take ~45 s on the reference Mac.
+      MOCK_DELAY_MS: ${SMOKE_MOCK_DELAY_MS:-0}
     user: "10001:10001"
     read_only: true
     security_opt: ["no-new-privileges:true"]
