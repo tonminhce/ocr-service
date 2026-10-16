@@ -164,6 +164,84 @@ async fn profile_runs_in_worker_persists_review_output_and_retains_original() {
     db.cleanup().await;
 }
 
+#[tokio::test]
+#[ignore = "requires TEST_DATABASE_URL, TEST_REDIS_URL and CREATE SCHEMA privileges"]
+async fn parser_outage_pauses_claims_without_spending_attempts() {
+    let db = Database::new().await;
+    let server = SlowInference::new(0).await;
+    let id = db.submit().await;
+    let mut unavailable = settings(&server.base, &db);
+    unavailable.parser_socket_path = db.parser.socket_path().with_file_name("missing.sock");
+    let shutdown = CancellationToken::new();
+    let handle = tokio::spawn(worker::run(db.store.clone(), unavailable, shutdown.clone()));
+    // max_attempts is 1: a claim during the outage would fail the job outright.
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    let job = db.store.get(id).await.unwrap().unwrap();
+    assert_eq!((job.status.as_str(), job.attempts), ("queued", 0));
+    assert_eq!(server.requests.load(Ordering::SeqCst), 0);
+    shutdown.cancel();
+    handle.await.unwrap().unwrap();
+
+    let shutdown = CancellationToken::new();
+    let handle = tokio::spawn(worker::run(
+        db.store.clone(),
+        settings(&server.base, &db),
+        shutdown.clone(),
+    ));
+    wait_terminal(&db, id).await;
+    shutdown.cancel();
+    handle.await.unwrap().unwrap();
+    let job = db.store.get(id).await.unwrap().unwrap();
+    assert_eq!((job.status.as_str(), job.attempts), ("succeeded", 1));
+    db.cleanup().await;
+}
+
+#[tokio::test]
+#[ignore = "requires TEST_DATABASE_URL, TEST_REDIS_URL and CREATE SCHEMA privileges"]
+async fn parser_session_outlives_model_latency_longer_than_its_frame_timeout() {
+    let db = Database::new().await;
+    // Scaled-down production shape: each model call is twice the parser frame
+    // timeout, and the parser is called again after every model reply.
+    let parser =
+        support::parser::ParserHarness::start_with(ocr_worker::parser_service::ServiceLimits {
+            frame_timeout: Duration::from_secs(1),
+            ..Default::default()
+        })
+        .await;
+    let server = SlowInference::new(2).await;
+    let id = Uuid::new_v4();
+    db.store
+        .submit(NewJob {
+            id,
+            filename: "two_pages.pdf".into(),
+            media_type: "application/pdf".into(),
+            extraction_profile: "vi_rental_contract_v1".into(),
+            sha256: "a".repeat(64),
+            input: include_bytes!("fixtures/two_pages.pdf").to_vec(),
+            idempotency_key: None,
+        })
+        .await
+        .unwrap();
+    let mut config = settings(&server.base, &db);
+    config.parser_socket_path = parser.socket_path();
+    let shutdown = CancellationToken::new();
+    let handle = tokio::spawn(worker::run(db.store.clone(), config, shutdown.clone()));
+    wait_terminal_within(&db, id, Duration::from_secs(20)).await;
+    shutdown.cancel();
+    handle.await.unwrap().unwrap();
+    let job = db.store.get(id).await.unwrap().unwrap();
+    assert_eq!(
+        (job.status.as_str(), job.attempts),
+        ("succeeded", 1),
+        "{:?}",
+        job.error
+    );
+    let result = job.result.unwrap();
+    assert_eq!(result["pages"].as_array().unwrap().len(), 2);
+    assert_eq!(server.requests.load(Ordering::SeqCst), 2);
+    db.cleanup().await;
+}
+
 struct SlowInference {
     base: String,
     started: Arc<Notify>,
@@ -487,7 +565,11 @@ async fn total_job_timeout_records_failure_and_drops_pending_inference() {
 }
 
 async fn wait_terminal(db: &Database, id: Uuid) {
-    tokio::time::timeout(Duration::from_secs(8), async {
+    wait_terminal_within(db, id, Duration::from_secs(8)).await;
+}
+
+async fn wait_terminal_within(db: &Database, id: Uuid, limit: Duration) {
+    tokio::time::timeout(limit, async {
         loop {
             if matches!(
                 db.store.get(id).await.unwrap().unwrap().status.as_str(),

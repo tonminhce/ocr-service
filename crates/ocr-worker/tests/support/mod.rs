@@ -2,7 +2,7 @@
 pub mod parser {
     use std::{os::unix::fs::PermissionsExt, path::PathBuf, time::Duration};
 
-    use ocr_worker::ProcessingError;
+    use ocr_worker::{ProcessingError, parser_service::ServiceLimits};
     use tempfile::TempDir;
     use tokio::{task::JoinHandle, time::timeout};
     use tokio_util::sync::CancellationToken;
@@ -16,6 +16,10 @@ pub mod parser {
 
     impl ParserHarness {
         pub async fn start() -> Self {
+            Self::start_with(ServiceLimits::default()).await
+        }
+
+        pub async fn start_with(limits: ServiceLimits) -> Self {
             let root = tempfile::tempdir().unwrap();
             let socket_directory = root.path().join("socket");
             let scratch_directory = root.path().join("scratch");
@@ -34,7 +38,7 @@ pub mod parser {
                 ocr_worker::parser_service::serve(
                     &service_path,
                     &service_scratch,
-                    ocr_worker::parser_service::ServiceLimits::default(),
+                    limits,
                     service_shutdown,
                 )
                 .await

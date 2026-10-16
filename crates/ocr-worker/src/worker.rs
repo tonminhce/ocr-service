@@ -1,4 +1,4 @@
-use std::time::Duration;
+use std::{path::PathBuf, time::Duration};
 
 use ocr_core::{
     domain::LeasedJob,
@@ -12,13 +12,60 @@ use tokio::{
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
 
-use crate::{ProcessingError, inference::Recognizer, queue::RedisQueue, settings::Settings};
+use crate::{
+    ProcessingError, inference::Recognizer, parser_client, queue::RedisQueue, settings::Settings,
+};
+
+const PARSER_PROBE_TIMEOUT: Duration = Duration::from_secs(1);
+const PARSER_HEALTH_TTL: Duration = Duration::from_secs(1);
 
 struct AbortDispatcherOnDrop(tokio::task::AbortHandle);
 
 impl Drop for AbortDispatcherOnDrop {
     fn drop(&mut self) {
         self.0.abort();
+    }
+}
+
+/// Every document needs the isolated parser. Claiming while it is down would
+/// spend each job's bounded attempts on an outage, so claims pause instead and
+/// notifications stay in Redis until the parser answers again.
+struct ParserGate {
+    socket_path: PathBuf,
+    healthy_until: Option<Instant>,
+    failures: u32,
+}
+
+impl ParserGate {
+    async fn ready(&mut self) -> bool {
+        if self
+            .healthy_until
+            .is_some_and(|until| Instant::now() < until)
+        {
+            return true;
+        }
+        match parser_client::health_check(&self.socket_path, PARSER_PROBE_TIMEOUT).await {
+            Ok(_) => {
+                if self.failures > 0 {
+                    info!(
+                        failed_probes = self.failures,
+                        "isolated parser recovered; resuming claims"
+                    );
+                }
+                self.failures = 0;
+                self.healthy_until = Some(Instant::now() + PARSER_HEALTH_TTL);
+                true
+            }
+            Err(error) => {
+                process_metrics().event(Event::ParserUnavailable);
+                if self.failures == 0 {
+                    warn!(error = %error, "isolated parser unavailable; pausing claims");
+                }
+                self.failures = self.failures.saturating_add(1);
+                self.healthy_until = None;
+                false
+            }
+        }
     }
 }
 
@@ -46,9 +93,17 @@ pub async fn run(
     let mut next_reclaim = Instant::now();
     let mut reclaim_cursor = "0-0".to_string();
     let mut read_failures = 0_u32;
+    let mut parser = ParserGate {
+        socket_path: settings.parser_socket_path.clone(),
+        healthy_until: None,
+        failures: 0,
+    };
     info!(concurrency = settings.worker_concurrency, model = %settings.vllm_model, "OCR worker started with Redis Streams transport");
     'running: loop {
-        if active.len() < settings.worker_concurrency && Instant::now() >= next_read {
+        let claimable = active.len() < settings.worker_concurrency && Instant::now() >= next_read;
+        if claimable && !parser.ready().await {
+            next_read = Instant::now() + backoff(parser.failures, poll);
+        } else if claimable {
             let capacity = settings.worker_concurrency - active.len();
             let messages = tokio::select! {
                 biased;

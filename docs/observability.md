@@ -72,6 +72,13 @@ cancelled/dropped HTTP futures are not completed errors. `recovery_attempted`
 counts extra crop observations. No counter claims an observation improved truth;
 that requires independently labeled evaluation.
 
+`parser_unavailable` counts failed isolated-parser health probes. The worker
+probes before each claim batch (a healthy answer is reused for one second). While
+probes fail it stops claiming, backs off up to 30 seconds, and leaves
+notifications in Redis, so a parser outage delays queued jobs instead of spending
+their attempts. Jobs already running when the parser fails still lose that
+attempt. A sustained non-zero rate means no new work is being claimed.
+
 `model_attempt_started` begins after acquiring the shared per-process R permit;
 `model_cancelled` counts dropped started attempts. Work cancelled while waiting
 for R has not started an inference attempt. These counters describe local HTTP

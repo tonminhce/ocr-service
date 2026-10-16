@@ -56,6 +56,7 @@ dimension!(Event {
     RegionCacheMiss => "region_cache_miss", RecoveryAttempted => "recovery_attempted",
     ModelFailed => "model_failed",
     ModelAttemptStarted => "model_attempt_started", ModelCancelled => "model_cancelled",
+    ParserUnavailable => "parser_unavailable",
 });
 dimension!(ModelFinish {
     Stop => "stop", Length => "length", ContentFilter => "content_filter",
