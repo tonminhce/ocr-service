@@ -155,3 +155,14 @@ verification, measurement, adoption. Never relabel a gate to close it.
   (mixed stdout/stderr log) caught by the drill and fixed same round.
   External provenance/hosted runs/push remain authority-gated; no
   capacity/quality claim.
+
+## Change log (round 4)
+
+- 2026-10-18: H14 first ladder rung `3bd9b7a` — 12/12 synthetic jobs
+  through the canonical W1/R1/L1 stack (mock 12 s/region), client/server
+  accounting matched exactly (attempts=1, outbox 0, no lease loss),
+  registry occupancy 12 with submit in-flight 1, three script-contract
+  refusals preserved as failed attempts. Three fixture volumes from the
+  disposable stack RETAINED per no-deletion rule (inventoried in trace).
+  Quality-qualified capacity, burst/soak rungs and real-model runs stay
+  owner/data gated.
