@@ -11,6 +11,10 @@ use crate::{Dataset, Split, benchmark};
 const MAX_JOBS: usize = 10_000;
 const MAX_PENDING_TASKS: usize = 4;
 const MAX_TOTAL_UPLOAD_BYTES: u64 = 4 * 1024 * 1024 * 1024;
+const MAX_OUTSTANDING_JOBS: usize = 1_000;
+const MAX_DRAIN_SECONDS: u64 = 3_600;
+const DEFAULT_OUTSTANDING_JOBS: usize = 100;
+const DEFAULT_DRAIN_SECONDS: u64 = 300;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -27,6 +31,8 @@ pub struct ArrivalConfig {
     pub max_jobs: usize,
     pub max_total_upload_bytes: u64,
     pub max_pending_tasks: usize,
+    pub max_outstanding_jobs: usize,
+    pub drain_deadline: Duration,
     pub seed: u64,
 }
 
@@ -80,8 +86,28 @@ impl ArrivalConfig {
             max_jobs,
             max_total_upload_bytes,
             max_pending_tasks,
+            max_outstanding_jobs: DEFAULT_OUTSTANDING_JOBS,
+            drain_deadline: Duration::from_secs(DEFAULT_DRAIN_SECONDS),
             seed,
         })
+    }
+
+    pub fn with_registry_limits(
+        mut self,
+        max_outstanding_jobs: usize,
+        drain_deadline_seconds: u64,
+    ) -> Result<Self> {
+        ensure!(
+            (1..=MAX_OUTSTANDING_JOBS).contains(&max_outstanding_jobs),
+            "maximum outstanding jobs must be 1..1000"
+        );
+        ensure!(
+            (1..=MAX_DRAIN_SECONDS).contains(&drain_deadline_seconds),
+            "drain deadline must be 1..3600 seconds"
+        );
+        self.max_outstanding_jobs = max_outstanding_jobs;
+        self.drain_deadline = Duration::from_secs(drain_deadline_seconds);
+        Ok(self)
     }
 
     pub fn schedule(&self) -> ArrivalSchedule {
@@ -217,8 +243,207 @@ pub struct ArrivalReport {
     pub successful_completion_p95_ms: Option<f64>,
     pub max_pending_tasks: usize,
     pub maximum_in_flight: usize,
+    pub max_outstanding_jobs: usize,
+    pub maximum_registry_occupancy: usize,
+    pub outstanding_registry_skipped: usize,
+    pub drain_deadline_seconds: f64,
     pub documents: Vec<ArrivalOccurrence>,
     pub limitations: Vec<String>,
+}
+
+type SubmitTask =
+    std::pin::Pin<Box<tokio::task::JoinHandle<(SubmittedBase, benchmark::Submission)>>>;
+
+struct SubmittedBase {
+    sequence: u64,
+    document_id: String,
+    scheduled_offset_ms: f64,
+    scheduler_lag_ms: f64,
+}
+
+struct RegistryEntry {
+    base: SubmittedBase,
+    job_id: Uuid,
+    progress: benchmark::Progress,
+}
+
+fn failed_document(
+    base: &SubmittedBase,
+    submission: benchmark::Submission,
+) -> benchmark::BenchmarkDocument {
+    let progress = &submission.progress;
+    benchmark::BenchmarkDocument {
+        document_id: base.document_id.clone(),
+        accepted: progress.submission_outcome == benchmark::SubmissionOutcome::Accepted,
+        submission_outcome: progress.submission_outcome,
+        idempotency_key: progress.idempotency_key.clone(),
+        submission_started_offset_ms: progress
+            .submission_started_offset
+            .map(|offset| offset.as_secs_f64() * 1000.0),
+        submission_started_offset: progress.submission_started_offset,
+        job_id: progress.job_id,
+        status: "failed".into(),
+        latency_ms: 0.0,
+        submit_latency_ms: progress.submit_latency_ms,
+        accepted_to_terminal_latency_ms: None,
+        attempts: None,
+        status_polls: progress.polls,
+        error_code: submission.outcome.failed_error(),
+    }
+}
+
+fn accepted_occurrence(
+    base: SubmittedBase,
+    job_id: Uuid,
+    progress: &benchmark::Progress,
+) -> ArrivalOccurrence {
+    ArrivalOccurrence {
+        sequence: base.sequence,
+        document_id: base.document_id.clone(),
+        scheduled_offset_ms: base.scheduled_offset_ms,
+        scheduler_lag_ms: base.scheduler_lag_ms,
+        offered: true,
+        skip_reason: None,
+        submit_latency_ms: progress.submit_latency_ms,
+        accepted_to_terminal_latency_ms: None,
+        result: Some(benchmark::BenchmarkDocument {
+            document_id: base.document_id,
+            accepted: true,
+            submission_outcome: progress.submission_outcome,
+            idempotency_key: progress.idempotency_key.clone(),
+            submission_started_offset_ms: progress
+                .submission_started_offset
+                .map(|offset| offset.as_secs_f64() * 1000.0),
+            submission_started_offset: progress.submission_started_offset,
+            job_id: Some(job_id),
+            status: "outstanding".into(),
+            latency_ms: 0.0,
+            submit_latency_ms: progress.submit_latency_ms,
+            accepted_to_terminal_latency_ms: None,
+            attempts: None,
+            status_polls: progress.polls,
+            error_code: None,
+        }),
+    }
+}
+
+fn collect_submitted(
+    base: SubmittedBase,
+    submission: benchmark::Submission,
+    registry: &mut Vec<RegistryEntry>,
+    results: &mut Vec<ArrivalOccurrence>,
+    max_outstanding_jobs: usize,
+    outstanding_registry_skipped: &mut usize,
+    maximum_registry_occupancy: &mut usize,
+) {
+    match submission.outcome {
+        benchmark::SubmitOutcome::Submitted(job_id) => {
+            if registry.len() >= max_outstanding_jobs {
+                *outstanding_registry_skipped += 1;
+                let mut occurrence = accepted_occurrence(base, job_id, &submission.progress);
+                occurrence.skip_reason = Some("outstanding_registry_limit");
+                results.push(occurrence);
+            } else {
+                registry.push(RegistryEntry {
+                    base,
+                    job_id,
+                    progress: submission.progress,
+                });
+                *maximum_registry_occupancy = (*maximum_registry_occupancy).max(registry.len());
+            }
+        }
+        benchmark::SubmitOutcome::Failed(_) => {
+            let mut document = failed_document(&base, submission);
+            if document.error_code.as_deref() == Some("document_deadline_exceeded") {
+                document.status = "timeout".into();
+            }
+            results.push(ArrivalOccurrence {
+                sequence: base.sequence,
+                document_id: base.document_id.clone(),
+                scheduled_offset_ms: base.scheduled_offset_ms,
+                scheduler_lag_ms: base.scheduler_lag_ms,
+                offered: true,
+                skip_reason: None,
+                submit_latency_ms: document.submit_latency_ms,
+                accepted_to_terminal_latency_ms: None,
+                result: Some(document),
+            });
+        }
+    }
+}
+
+fn tracked_occurrence(
+    entry: RegistryEntry,
+    outcome: std::result::Result<benchmark::Status, String>,
+) -> ArrivalOccurrence {
+    let RegistryEntry {
+        base,
+        job_id,
+        progress,
+    } = entry;
+    let (status, attempts, error_code, accepted_to_terminal) = match outcome {
+        Ok(status) => {
+            let error = (status.status == "failed").then(|| "server_job_failed".to_string());
+            (
+                status.status,
+                Some(status.attempts),
+                error,
+                progress.accepted_to_terminal_latency_ms,
+            )
+        }
+        Err(error) => ("failed".to_string(), None, Some(error), None),
+    };
+    let accepted_to_terminal_latency_ms = accepted_to_terminal;
+    ArrivalOccurrence {
+        sequence: base.sequence,
+        document_id: base.document_id.clone(),
+        scheduled_offset_ms: base.scheduled_offset_ms,
+        scheduler_lag_ms: base.scheduler_lag_ms,
+        offered: true,
+        skip_reason: None,
+        submit_latency_ms: progress.submit_latency_ms,
+        accepted_to_terminal_latency_ms,
+        result: Some(benchmark::BenchmarkDocument {
+            document_id: base.document_id,
+            accepted: true,
+            submission_outcome: benchmark::SubmissionOutcome::Accepted,
+            idempotency_key: progress.idempotency_key,
+            submission_started_offset_ms: progress
+                .submission_started_offset
+                .map(|offset| offset.as_secs_f64() * 1000.0),
+            submission_started_offset: progress.submission_started_offset,
+            job_id: Some(job_id),
+            status,
+            latency_ms: 0.0,
+            submit_latency_ms: progress.submit_latency_ms,
+            accepted_to_terminal_latency_ms,
+            attempts,
+            status_polls: progress.polls,
+            error_code,
+        }),
+    }
+}
+
+enum TrackedOutcome {
+    Observed(
+        RegistryEntry,
+        std::result::Result<benchmark::Status, String>,
+    ),
+    Deadline(RegistryEntry),
+}
+
+fn timeout_occurrence(entry: RegistryEntry) -> ArrivalOccurrence {
+    let RegistryEntry {
+        base,
+        job_id,
+        progress,
+    } = entry;
+    let mut occurrence = accepted_occurrence(base, job_id, &progress);
+    if let Some(result) = occurrence.result.as_mut() {
+        result.status = "timeout".into();
+        result.error_code = Some("document_deadline_exceeded".into());
+    }
+    occurrence
 }
 
 pub async fn run(
@@ -235,20 +460,35 @@ pub async fn run(
     let schedule = arrival_config.schedule();
     let run_id = Uuid::new_v4();
     let client = benchmark::build_client(benchmark_config)?;
+    let dataset_arc = std::sync::Arc::new(dataset.clone());
     let started = Instant::now();
-    let mut pending = FuturesUnordered::new();
+    let mut pending: FuturesUnordered<SubmitTask> = FuturesUnordered::new();
     let mut results = Vec::with_capacity(schedule.arrivals.len());
     let mut scheduler_lags = Vec::with_capacity(schedule.arrivals.len());
     let mut source_bytes_budgeted = 0_u64;
     let mut upload_budget_skipped = 0;
     let mut maximum_in_flight = 0;
+    let mut outstanding_registry_skipped = 0;
+    let mut registry: Vec<RegistryEntry> = Vec::new();
+    let mut maximum_registry_occupancy = 0;
 
     for arrival in &schedule.arrivals {
         let due = started + arrival.offset;
         loop {
             tokio::select! {
                 biased;
-                Some(result) = pending.next(), if !pending.is_empty() => results.push(result),
+                Some(submitted) = pending.next(), if !pending.is_empty() => {
+                    let (base, submission) = submitted.expect("submit task must not panic");
+                    collect_submitted(
+                        base,
+                        submission,
+                        &mut registry,
+                        &mut results,
+                        arrival_config.max_outstanding_jobs,
+                        &mut outstanding_registry_skipped,
+                        &mut maximum_registry_occupancy,
+                    );
+                }
                 _ = tokio::time::sleep_until(due) => break,
             }
         }
@@ -306,42 +546,110 @@ pub async fn run(
         }
 
         source_bytes_budgeted += source_size;
-        let client = client.clone();
-        pending.push(async move {
-            let result = benchmark::execute_document(
-                &client,
-                dataset,
-                document,
-                benchmark_config,
-                benchmark::Occurrence {
-                    run_id,
-                    run_started: started.into_std(),
-                    sequence: Some(arrival.sequence),
-                    expected_source_size: Some(source_size),
-                },
+        let submit_client = client.clone();
+        let submit_config = benchmark_config.clone();
+        let submit_dataset = dataset_arc.clone();
+        let submit_document = document.clone();
+        let occurrence = benchmark::Occurrence {
+            run_id,
+            run_started: started.into_std(),
+            sequence: Some(arrival.sequence),
+            expected_source_size: Some(source_size),
+        };
+        let spawn_offset_ms = offset_ms;
+        let spawn_lag_ms = lag_ms;
+        pending.push(Box::pin(tokio::spawn(async move {
+            let submission = benchmark::submit_document_deadlined(
+                &submit_client,
+                &submit_dataset,
+                &submit_document,
+                &submit_config,
+                occurrence,
+                submit_config.deadline,
             )
             .await;
-            let submit_latency_ms = result.submit_latency_ms;
-            let accepted_to_terminal_latency_ms = result.accepted_to_terminal_latency_ms;
-            ArrivalOccurrence {
-                sequence: arrival.sequence,
-                document_id: document.id.clone(),
-                scheduled_offset_ms: offset_ms,
-                scheduler_lag_ms: lag_ms,
-                offered: true,
-                skip_reason: None,
-                submit_latency_ms,
-                accepted_to_terminal_latency_ms,
-                result: Some(result),
-            }
-        });
+            (
+                SubmittedBase {
+                    sequence: occurrence.sequence.unwrap_or_default(),
+                    document_id: submit_document.id,
+                    scheduled_offset_ms: spawn_offset_ms,
+                    scheduler_lag_ms: spawn_lag_ms,
+                },
+                submission,
+            )
+        })));
         maximum_in_flight = maximum_in_flight.max(pending.len());
     }
 
     let schedule_finished = Instant::now();
     let schedule_elapsed_seconds = schedule_finished.duration_since(started).as_secs_f64();
-    while let Some(result) = pending.next().await {
-        results.push(result);
+    while let Some(submitted) = pending.next().await {
+        let (base, submission) = submitted.expect("submit task must not panic");
+        collect_submitted(
+            base,
+            submission,
+            &mut registry,
+            &mut results,
+            arrival_config.max_outstanding_jobs,
+            &mut outstanding_registry_skipped,
+            &mut maximum_registry_occupancy,
+        );
+    }
+    let mut tracked: Vec<(
+        RegistryEntry,
+        std::result::Result<benchmark::Status, String>,
+    )> = Vec::with_capacity(registry.len());
+    let drain = async {
+        let mut trackers: FuturesUnordered<
+            std::pin::Pin<Box<tokio::task::JoinHandle<TrackedOutcome>>>,
+        > = FuturesUnordered::new();
+        for entry in registry.drain(..) {
+            let track_client = client.clone();
+            let track_config = benchmark_config.clone();
+            let document_deadline = benchmark_config.deadline;
+            trackers.push(Box::pin(tokio::spawn(async move {
+                let submit_elapsed = entry.progress.submit_deadline_consumed();
+                let remaining = document_deadline.saturating_sub(submit_elapsed);
+                let mut progress = entry.progress.clone();
+                match tokio::time::timeout(
+                    remaining,
+                    benchmark::track_document(
+                        &track_client,
+                        entry.job_id,
+                        &track_config,
+                        &mut progress,
+                    ),
+                )
+                .await
+                {
+                    Ok(outcome) => {
+                        TrackedOutcome::Observed(RegistryEntry { progress, ..entry }, outcome)
+                    }
+                    Err(_) => TrackedOutcome::Deadline(entry),
+                }
+            })));
+        }
+        while let Some(tracked_pair) = trackers.next().await {
+            match tracked_pair.expect("track task must not panic") {
+                TrackedOutcome::Observed(entry, outcome) => {
+                    tracked.push((entry, outcome));
+                }
+                TrackedOutcome::Deadline(entry) => {
+                    results.push(timeout_occurrence(entry));
+                }
+            }
+        }
+    };
+    if tokio::time::timeout(arrival_config.drain_deadline, drain)
+        .await
+        .is_err()
+    {
+        for entry in registry.drain(..) {
+            results.push(timeout_occurrence(entry));
+        }
+    }
+    for (entry, outcome) in tracked {
+        results.push(tracked_occurrence(entry, outcome));
     }
     let client_drain_seconds = Instant::now()
         .duration_since(schedule_finished)
@@ -421,7 +729,7 @@ pub async fn run(
         schedule.window,
     );
     Ok(ArrivalReport {
-        schema_version: "ocr-arrival-benchmark/1.0.0",
+        schema_version: "ocr-arrival-benchmark/1.1.0",
         run_id,
         dataset_name: dataset.manifest.dataset_name.clone(),
         synthetic: dataset.manifest.synthetic,
@@ -484,6 +792,10 @@ pub async fn run(
         ),
         max_pending_tasks: arrival_config.max_pending_tasks,
         maximum_in_flight,
+        max_outstanding_jobs: arrival_config.max_outstanding_jobs,
+        maximum_registry_occupancy,
+        outstanding_registry_skipped,
+        drain_deadline_seconds: arrival_config.drain_deadline.as_secs_f64(),
         documents: results,
         limitations: vec![
             "Repeated occurrences of a corpus source are workload repetitions, not independent quality samples.".into(),

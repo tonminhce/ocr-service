@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 use std::time::{Duration, Instant};
 use uuid::Uuid;
 
+#[derive(Clone)]
 pub struct BenchmarkConfig {
     pub base_url: Url,
     pub clients: usize,
@@ -217,23 +218,30 @@ pub(crate) async fn execute_document(
     occurrence: Occurrence,
 ) -> BenchmarkDocument {
     let started = Instant::now();
-    let mut progress = Progress::default();
-    let outcome = tokio::time::timeout(
-        config.deadline,
-        execute(client, dataset, document, config, occurrence, &mut progress),
-    )
-    .await;
-    let (status, attempts, error_code) = match outcome {
-        Ok(Ok(status)) => {
-            let error = (status.status == "failed").then(|| "server_job_failed".into());
-            (status.status, Some(status.attempts), error)
+    let submission = submit_document(client, dataset, document, config, occurrence).await;
+    let mut progress = submission.progress;
+    let (status, attempts, error_code) = match submission.outcome {
+        SubmitOutcome::Submitted(job_id) => {
+            progress.job_id = Some(job_id);
+            let tracked = tokio::time::timeout(
+                config.deadline.saturating_sub(started.elapsed()),
+                track_document(client, job_id, config, &mut progress),
+            )
+            .await;
+            match tracked {
+                Ok(Ok(status)) => {
+                    let error = (status.status == "failed").then(|| "server_job_failed".into());
+                    (status.status, Some(status.attempts), error)
+                }
+                Ok(Err(error)) => ("failed".into(), None, Some(error)),
+                Err(_) => (
+                    "timeout".into(),
+                    None,
+                    Some("document_deadline_exceeded".into()),
+                ),
+            }
         }
-        Ok(Err(error)) => ("failed".into(), None, Some(error)),
-        Err(_) => (
-            "timeout".into(),
-            None,
-            Some("document_deadline_exceeded".into()),
-        ),
+        SubmitOutcome::Failed(error) => ("failed".into(), None, Some(error)),
     };
     BenchmarkDocument {
         document_id: document.id.clone(),
@@ -254,25 +262,130 @@ pub(crate) async fn execute_document(
         error_code,
     }
 }
+
+pub(crate) struct Submission {
+    pub progress: Progress,
+    pub outcome: SubmitOutcome,
+}
+
+pub(crate) enum SubmitOutcome {
+    Submitted(Uuid),
+    Failed(String),
+}
+
+impl SubmitOutcome {
+    pub(crate) fn failed_error(&self) -> Option<String> {
+        match self {
+            SubmitOutcome::Submitted(_) => None,
+            SubmitOutcome::Failed(error) => Some(error.clone()),
+        }
+    }
+}
+
+pub(crate) async fn submit_document(
+    client: &Client,
+    dataset: &Dataset,
+    document: &Document,
+    config: &BenchmarkConfig,
+    occurrence: Occurrence,
+) -> Submission {
+    submit_document_deadlined(
+        client,
+        dataset,
+        document,
+        config,
+        occurrence,
+        Duration::from_secs(86400 * 365),
+    )
+    .await
+}
+
+pub(crate) async fn submit_document_deadlined(
+    client: &Client,
+    dataset: &Dataset,
+    document: &Document,
+    config: &BenchmarkConfig,
+    occurrence: Occurrence,
+    deadline: Duration,
+) -> Submission {
+    let started = Instant::now();
+    let mut progress = Progress::default();
+    let outcome = match tokio::time::timeout(
+        deadline,
+        submit(client, dataset, document, config, occurrence, &mut progress),
+    )
+    .await
+    {
+        Ok(Ok(job_id)) => SubmitOutcome::Submitted(job_id),
+        Ok(Err(error)) => SubmitOutcome::Failed(error),
+        Err(_) => SubmitOutcome::Failed("document_deadline_exceeded".into()),
+    };
+    progress.submit_latency_ms = Some(started.elapsed().as_secs_f64() * 1000.0);
+    Submission { progress, outcome }
+}
+
+pub(crate) async fn track_document(
+    client: &Client,
+    job_id: Uuid,
+    config: &BenchmarkConfig,
+    progress: &mut Progress,
+) -> std::result::Result<Status, String> {
+    let accepted_at = progress.accepted_at.unwrap_or_else(Instant::now);
+    loop {
+        progress.polls += 1;
+        let url = config
+            .base_url
+            .join(&format!("v1/ocr/jobs/{job_id}/status"))
+            .expect("fixed relative URL");
+        let response = client
+            .get(url)
+            .bearer_auth(&config.token)
+            .send()
+            .await
+            .map_err(|_| "poll_transport_failed")?;
+        if response.status() != StatusCode::OK {
+            return Err(format!("poll_http_{}", response.status().as_u16()));
+        }
+        let status: Status = serde_json::from_slice(&response_bounded(response, 16 * 1024).await?)
+            .map_err(|_| "status_response_invalid")?;
+        match status.status.as_str() {
+            "succeeded" | "failed" => {
+                progress.accepted_to_terminal_latency_ms =
+                    Some(accepted_at.elapsed().as_secs_f64() * 1000.0);
+                return Ok(status);
+            }
+            "queued" | "processing" => tokio::time::sleep(config.poll_interval).await,
+            _ => return Err("unknown_job_status".into()),
+        }
+    }
+}
 #[derive(Deserialize)]
 struct Submitted {
     id: Uuid,
 }
 #[derive(Deserialize)]
-struct Status {
-    status: String,
-    attempts: i32,
+pub(crate) struct Status {
+    pub(crate) status: String,
+    pub(crate) attempts: i32,
 }
-#[derive(Default)]
-struct Progress {
-    polls: u64,
-    submission_outcome: SubmissionOutcome,
-    idempotency_key: Option<String>,
-    submission_started_offset: Option<Duration>,
-    job_id: Option<Uuid>,
-    submit_latency_ms: Option<f64>,
-    accepted_at: Option<Instant>,
-    accepted_to_terminal_latency_ms: Option<f64>,
+#[derive(Default, Clone)]
+pub(crate) struct Progress {
+    pub(crate) polls: u64,
+    pub(crate) submission_outcome: SubmissionOutcome,
+    pub(crate) idempotency_key: Option<String>,
+    pub(crate) submission_started_offset: Option<Duration>,
+    pub(crate) job_id: Option<Uuid>,
+    pub(crate) submit_latency_ms: Option<f64>,
+    pub(crate) accepted_at: Option<Instant>,
+    pub(crate) accepted_to_terminal_latency_ms: Option<f64>,
+}
+
+impl Progress {
+    pub(crate) fn submit_deadline_consumed(&self) -> Duration {
+        self.submit_latency_ms
+            .map(|millis| Duration::from_secs_f64(millis / 1000.0))
+            .unwrap_or_default()
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -283,14 +396,14 @@ pub(crate) struct Occurrence {
     pub expected_source_size: Option<u64>,
 }
 
-async fn execute(
+async fn submit(
     client: &Client,
     dataset: &Dataset,
     document: &Document,
     config: &BenchmarkConfig,
     occurrence: Occurrence,
     progress: &mut Progress,
-) -> std::result::Result<Status, String> {
+) -> std::result::Result<Uuid, String> {
     let submission_started = Instant::now();
     let Occurrence {
         run_id,
@@ -372,33 +485,7 @@ async fn execute(
         serde_json::from_slice(&response_bounded(response, 64 * 1024).await?)
             .map_err(|_| "submit_response_invalid")?;
     progress.job_id = Some(submitted.id);
-    loop {
-        progress.polls += 1;
-        let url = config
-            .base_url
-            .join(&format!("v1/ocr/jobs/{}/status", submitted.id))
-            .expect("fixed relative URL");
-        let response = client
-            .get(url)
-            .bearer_auth(&config.token)
-            .send()
-            .await
-            .map_err(|_| "poll_transport_failed")?;
-        if response.status() != StatusCode::OK {
-            return Err(format!("poll_http_{}", response.status().as_u16()));
-        }
-        let status: Status = serde_json::from_slice(&response_bounded(response, 16 * 1024).await?)
-            .map_err(|_| "status_response_invalid")?;
-        match status.status.as_str() {
-            "succeeded" | "failed" => {
-                progress.accepted_to_terminal_latency_ms =
-                    Some(accepted_at.elapsed().as_secs_f64() * 1000.0);
-                return Ok(status);
-            }
-            "queued" | "processing" => tokio::time::sleep(config.poll_interval).await,
-            _ => return Err("unknown_job_status".into()),
-        }
-    }
+    Ok(submitted.id)
 }
 async fn response_bounded(
     response: reqwest::Response,

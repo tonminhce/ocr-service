@@ -93,6 +93,8 @@ async fn main() -> Result<()> {
             let max_jobs = number(&mut options, "--max-jobs", None)?;
             let max_upload_bytes = number_u64(&mut options, "--max-upload-bytes", None)?;
             let max_pending = number(&mut options, "--max-pending-tasks", None)?;
+            let max_outstanding = number(&mut options, "--max-outstanding-jobs", Some(100))?;
+            let drain_deadline = number(&mut options, "--drain-deadline-seconds", Some(300))?;
             let seed = match options.remove("--seed") {
                 Some(value) => value
                     .parse::<u64>()
@@ -125,7 +127,8 @@ async fn main() -> Result<()> {
                 max_upload_bytes,
                 max_pending,
                 seed,
-            )?;
+            )?
+            .with_registry_limits(max_outstanding, drain_deadline as u64)?;
             serde_json::to_value(
                 run_arrival(&dataset, split, &benchmark_config, &arrival_config).await?,
             )?

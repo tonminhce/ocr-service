@@ -85,6 +85,7 @@ pub struct GoldEvidence {
     pub quote: String,
 }
 
+#[derive(Clone)]
 pub struct Dataset {
     pub manifest: Manifest,
     base: PathBuf,

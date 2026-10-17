@@ -127,8 +127,15 @@ The command requires explicit rate, duration, max jobs, max upload bytes and
 pending-task cap. Poisson mode additionally requires `--seed`. Supported bounds
 are 0.001–100 occurrences/second, 1–86,400 seconds, 1–10,000 occurrences, 1–4 GiB
 total source bytes and 1–4 pending tasks. Pending tasks cannot exceed `--clients`.
-Each input is still hash-checked immediately before upload and retains the
-existing 32 MiB per-source bound.
+Submissions and terminal tracking are separate lifecycles: the pending-task cap
+bounds concurrent uploads only, while accepted or acceptance-unknown jobs move
+into a bounded outstanding registry (default 100, at most 1,000 identities — no
+document bytes) and are polled to terminal under a finite drain deadline
+(default 300 s, at most 3,600 s). When the registry is full, the affected
+occurrence records the explicit `outstanding_registry_limit` skip; such an
+occurrence may already be server-accepted and must be reconciled like any other
+outstanding submission before another run. Each input is still hash-checked
+immediately before upload and retains the existing 32 MiB per-source bound.
 
 The report separates scheduled/offered tasks, submission attempts, accepted,
 rejected, local failures, unknown acceptance, completed, succeeded, failed,

@@ -262,6 +262,80 @@ async fn fixed_arrivals_continue_under_saturation_and_occurrences_get_unique_key
 }
 
 #[tokio::test]
+async fn arrival_registry_accepts_more_than_four_lifetime_jobs_with_fast_submits() {
+    let (_directory, dataset) = arrival_dataset();
+    let (base, state, server) =
+        start_arrival_server(Duration::ZERO, Duration::from_millis(30), Vec::new()).await;
+    let benchmark = arrival_benchmark_config(&base, 1);
+    let arrival = ArrivalConfig::new(ArrivalPattern::FixedRate, 20.0, 1, 10, 1_000_000, 1, 23)
+        .unwrap()
+        .with_registry_limits(10, 60)
+        .unwrap();
+
+    let report = run_arrival(&dataset, Split::Test, &benchmark, &arrival)
+        .await
+        .unwrap();
+    server.abort();
+
+    assert_eq!(report.scheduled, 10);
+    assert_eq!(report.offered, 10);
+    assert_eq!(report.client_skipped_or_late, 0);
+    assert_eq!(report.accepted, 10);
+    assert_eq!(report.completed, 10);
+    assert_eq!(report.outstanding, 0);
+    assert_eq!(report.outstanding_registry_skipped, 0);
+    assert_eq!(state.submitted.load(Ordering::SeqCst), 10);
+    assert_eq!(state.peak.load(Ordering::SeqCst), 1);
+    assert!(report.maximum_registry_occupancy > 4);
+    assert_eq!(report.max_outstanding_jobs, 10);
+}
+
+#[tokio::test]
+async fn full_outstanding_registry_records_specific_skip() {
+    let (_directory, dataset) = arrival_dataset();
+    let (base, _state, server) =
+        start_arrival_server(Duration::ZERO, Duration::from_millis(80), Vec::new()).await;
+    let benchmark = arrival_benchmark_config(&base, 1);
+    let arrival = ArrivalConfig::new(ArrivalPattern::FixedRate, 50.0, 1, 6, 1_000_000, 1, 29)
+        .unwrap()
+        .with_registry_limits(1, 60)
+        .unwrap();
+
+    let report = run_arrival(&dataset, Split::Test, &benchmark, &arrival)
+        .await
+        .unwrap();
+    server.abort();
+
+    assert_eq!(report.scheduled, 6);
+    assert!(report.offered >= 1);
+    assert!(report.outstanding_registry_skipped >= 1);
+    assert!(
+        report
+            .documents
+            .iter()
+            .any(|occurrence| occurrence.skip_reason == Some("outstanding_registry_limit"))
+    );
+    let accepted_total: usize = report
+        .documents
+        .iter()
+        .filter(|occurrence| {
+            occurrence
+                .result
+                .as_ref()
+                .is_some_and(|result| result.accepted)
+        })
+        .count();
+    assert!(accepted_total >= 1);
+    let skipped: usize = report
+        .documents
+        .iter()
+        .filter(|occurrence| occurrence.skip_reason == Some("outstanding_registry_limit"))
+        .count();
+    assert_eq!(skipped, report.outstanding_registry_skipped);
+    assert!(accepted_total >= skipped);
+}
+
+#[tokio::test]
 async fn arrival_runner_enforces_total_upload_budget_and_reports_http_rejections() {
     let (_directory, dataset) = arrival_dataset();
     let one_source = dataset.source_size(&dataset.manifest.documents[0]).unwrap();
