@@ -176,3 +176,13 @@ verification, measurement, adoption. Never relabel a gate to close it.
   administration/restore_target suites. Three fixture-setup corrections
   preserved. Fixtures removed by exact name; 13 originals intact. The
   "ignored never counted" evidence gap is closed at current source.
+
+## Change log (round 6)
+
+- 2026-10-18: IPC overhead measured `b6d01f3` (page_info ~8 ms pure IPC;
+  renders Poppler-dominated ~120–160 ms → IPC non-dominant, persistent
+  sessions confirmed). DB scaling study `HEAD` (outbox claim flat ~6 ms
+  10k→100k; claim index-shaped via jobs_queued_due_idx; snapshot 147 ms
+  at 100k within its 3 s observer budget; no migration justified). Both
+  probes are ignored-tagged measurement tools; fixtures disposed;
+  13 originals intact.
