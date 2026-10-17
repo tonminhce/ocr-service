@@ -13,10 +13,13 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import sys
 import uuid
 
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+import verify_capture
 
 
 def main():
@@ -46,16 +49,31 @@ def main():
                "-f", "compose.production.yaml", "-f", "compose.production.smoke.yaml",
                "-f", "compose.monitoring.yaml", "--profile", "monitoring"]
     report = {"schema_version": "ocr-monitoring-smoke/1.0.0", "project": project,
-              "real_model_called": False, "external_notifications_sent": False, "checks": []}
+              "real_model_called": False, "external_notifications_sent": False,
+              "checks": [], "captures": []}
     sequence = 0
 
     def run(command, name, timeout=120):
         nonlocal sequence
         sequence += 1
+        capture = verify_capture.run_captured(command, cwd=ROOT, env=environment,
+                                               timeout=timeout)
+        verify_capture.scan_secrets(capture.stdout, allow_hex64=True)
+        verify_capture.scan_secrets(capture.stderr, allow_hex64=True)
         with (output / "logs" / f"{sequence:02d}-{name}.log").open("wb") as log:
-            result = subprocess.run(command, cwd=ROOT, env=environment, stdout=log,
-                                    stderr=subprocess.STDOUT, timeout=timeout)
-        if result.returncode:
+            log.write(capture.stdout)
+            log.write(b"\n--- stderr ---\n")
+            log.write(capture.stderr)
+        report["captures"].append({
+            "name": name,
+            "returncode": capture.returncode,
+            "elapsed_seconds": capture.elapsed,
+            "stdout_sha256": capture.stdout_sha256,
+            "stderr_sha256": capture.stderr_sha256,
+            "stdout_truncated": capture.stdout_truncated,
+            "stderr_truncated": capture.stderr_truncated,
+        })
+        if capture.returncode:
             raise RuntimeError(f"{name} failed; inspect its private log")
 
     def request(port, path, token=None):
