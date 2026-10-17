@@ -62,7 +62,7 @@ def main():
         verify_capture.scan_secrets(capture.stderr, allow_hex64=True)
         with (output / "logs" / f"{sequence:02d}-{name}.log").open("wb") as log:
             log.write(capture.stdout)
-            log.write(b"\n--- stderr ---\n")
+        with (output / "logs" / f"{sequence:02d}-{name}.stderr").open("wb") as log:
             log.write(capture.stderr)
         report["captures"].append({
             "name": name,

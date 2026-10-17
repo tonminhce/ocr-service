@@ -75,11 +75,33 @@ baseline prod-smoke stack is up.
 
 - Local Trivy scan/SBOM: NOT_RUN (tool absent on host; wired for hosted
   CI in H06).
-- 18-check monitoring drill on these images: NOT_RUN this round (time/
-  memory budget after the pipeline drill; next candidate step before any
-  adoption decision).
+- 18-check monitoring drill on these images: initially NOT_RUN, then RUN
+  and PASSED after fixing the H05 log-format regression — all 18 checks
+  green on the canonical images (see below), with strict-capture hashes
+  recorded and no real model/external notification.
 - Hosted CI, registry publication, signing/provenance: authority-gated.
 - No capacity/quality claim follows from these rehearsals.
+
+## Monitoring drill addendum (canonical images)
+
+After the pipeline drill, the 18-check monitoring fault drill was run on
+the same canonical images and PASSED all 18 checks
+(`ocr-monitoring-smoke/1.0.0`): resource/secret mount boundaries, four
+authenticated self/target scrapes, unauthenticated denial, collector
+freshness, parser+model dependency alerting (fire → Alertmanager ingest →
+resolve), durable collector failure/recovery, worker target-down
+alerting, original complete job rows preserved through faults and after a
+fresh job, and the fresh profile job succeeding post-recovery. H05
+strict-capture controls were live: 13 command captures with per-stream
+SHA-256, truncation flags and secret scans (`real_model_called: false`,
+`external_notifications_sent: false`).
+
+A regression introduced by the H05 wiring was caught by this drill and
+fixed in the same round: `run()` had appended stderr into the stdout log
+file, breaking the drill's single-JSON log read-back ("Extra data").
+Stderr now goes to a separate bounded `.stderr` file per step; the stdout
+log keeps its original single-stream contract; capture metadata is
+unchanged. Both the failed attempt and the fix are recorded.
 
 ## Rollback
 
