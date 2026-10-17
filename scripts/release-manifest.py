@@ -41,6 +41,25 @@ def pin_image(metadata):
     return image_id, "local_engine_identity"
 
 
+def verify_scan_receipts(images, receipts_dir):
+    receipts = {path.name for path in receipts_dir.iterdir()}
+    expected = set()
+    for name in images:
+        reference = images[name]["requested_reference"]
+        normalized = reference.replace('/', '-').replace(':', '-').replace('@', '-')
+        expected.add(f"sbom-{normalized}.cdx.json")
+        expected.add(f"vulnerabilities-{normalized}.txt")
+    missing = expected - receipts
+    unexpected = {receipt for receipt in receipts if receipt.startswith(("sbom-", "vulnerabilities-"))} - expected
+    if missing or unexpected:
+        details = []
+        if missing:
+            details.append("missing receipts: " + ", ".join(sorted(missing)))
+        if unexpected:
+            details.append("receipts without a deployed image: " + ", ".join(sorted(unexpected)))
+        raise ValueError("; ".join(details))
+
+
 def inspect_image(reference):
     if not REFERENCE.fullmatch(reference):
         raise ValueError("invalid image reference")
@@ -59,13 +78,14 @@ def main():
     parser.add_argument("--layout-model", type=pathlib.Path)
     parser.add_argument("--model-sha256")
     parser.add_argument("--monitoring", action="store_true")
+    parser.add_argument("--scan-receipts-dir", type=pathlib.Path)
     args = parser.parse_args()
     if args.model_sha256 and not re.fullmatch(r"[0-9a-f]{64}", args.model_sha256):
         parser.error("--model-sha256 requires lowercase SHA-256")
     images = {
         name: inspect_image(reference) for name, reference in {
             "application": args.app_image, "parser": args.parser_image, "backup": args.backup_image,
-            "postgres": "postgres:18",
+            "postgres": "postgres:18@sha256:74935e72241653ca55e0414067e6d8763aceb8a810eb51b452253ec3dcfc4336",
             "redis": "redis:8.2-alpine@sha256:b51665e66f00759be7c3152ad5ac3c66fb2f619c13ef62dea7cc1f9914524635",
         }.items()
     }
@@ -105,6 +125,8 @@ def main():
     mapping.update({"parser": "parser", "parser-socket-init": "parser", "postgres": "postgres", "redis": "redis"})
     if args.monitoring:
         mapping.update({"prometheus": "prometheus", "alertmanager": "alertmanager"})
+    if args.scan_receipts_dir:
+        verify_scan_receipts(images, args.scan_receipts_dir)
     lock = {"services": {service: {"image": images[image]["pinned_reference"], "pull_policy": "never"} for service, image in mapping.items()}}
     backup_lock = {"services": {service: {"image": images["backup"]["pinned_reference"], "pull_policy": "never"} for service in ["backup", "backup-verify"]}}
     args.output.mkdir(mode=0o700, parents=True, exist_ok=False)

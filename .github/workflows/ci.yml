@@ -23,7 +23,7 @@ jobs:
           --health-cmd "redis-cli ping"
           --health-interval 2s --health-timeout 3s --health-retries 30
       postgres:
-        image: postgres:18
+        image: postgres:18@sha256:74935e72241653ca55e0414067e6d8763aceb8a810eb51b452253ec3dcfc4336
         env:
           POSTGRES_DB: ocr_test
           POSTGRES_USER: ocr
@@ -141,7 +141,8 @@ jobs:
         run: |
           mkdir -p release
           monitoring_images=$(docker compose --env-file /dev/null -f compose.production.yaml -f compose.monitoring.yaml --profile monitoring config --images | grep '^prom/')
-          for image in "ocr-service:${{ github.sha }}" "ocr-service:parser-${{ github.sha }}" "ocr-service:backup-${{ github.sha }}" $monitoring_images; do
+          runtime_images="postgres:18@sha256:74935e72241653ca55e0414067e6d8763aceb8a810eb51b452253ec3dcfc4336 redis:8.2-alpine@sha256:b51665e66f00759be7c3152ad5ac3c66fb2f619c13ef62dea7cc1f9914524635"
+          for image in "ocr-service:${{ github.sha }}" "ocr-service:parser-${{ github.sha }}" "ocr-service:backup-${{ github.sha }}" $monitoring_images $runtime_images; do
             name=${image//[\/:@]/-}
             trivy image --quiet --format cyclonedx --output "release/sbom-$name.cdx.json" "$image"
             trivy image --quiet --severity HIGH,CRITICAL --format table "$image" | tee "release/vulnerabilities-$name.txt"
@@ -150,7 +151,7 @@ jobs:
           docker image inspect --format '{{index .RepoTags 0}} {{.Id}}' "ocr-service:${{ github.sha }}" "ocr-service:parser-${{ github.sha }}" "ocr-service:backup-${{ github.sha }}" | tee release/image-ids.txt
       - name: Load runtime images for local inventory
         run: |
-          docker pull postgres:18
+          docker pull postgres:18@sha256:74935e72241653ca55e0414067e6d8763aceb8a810eb51b452253ec3dcfc4336
           docker pull redis:8.2-alpine@sha256:b51665e66f00759be7c3152ad5ac3c66fb2f619c13ef62dea7cc1f9914524635
       - name: Local release inventory and digest lock
         run: |

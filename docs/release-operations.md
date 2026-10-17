@@ -79,6 +79,31 @@ Both local drills passed. The strengthened repeat passed all 18 checks, includin
 
 The subsequent [parser boundary matrix](a06b-boundary-execution-trace.md) adds active IPv4 TCP denial with live positive controls, synthetic sibling mount absence, scratch noexec and worker socket permissions. It passed seven checks on specified historical Linux ARM64 images, preserved all baseline container IDs and retained its fresh socket volume. The harness accepts only locally available matching Linux image platforms and resolves immutable IDs without pulling/building; it does not start the application, database, worker or real models. CI now invokes it after building its images and running the packaged drill, and uploads its report. That is configured current-source coverage; no hosted run or current-worktree binary attestation is claimed by the historical local matrix.
 
+## Build-input identity and toolchain policy
+
+Every deployed runtime image — application, parser, backup, PostgreSQL,
+Redis, Prometheus and Alertmanager — is scanned and SBOM'd in CI from the
+same pinned references the release inventory records, and
+`release-manifest.py --scan-receipts-dir release` fails when receipts and
+the deployed image set differ in either direction. PostgreSQL is pinned by
+manifest digest (`postgres:18@sha256:74935e72…`, the same identity the live
+local stack runs); digest pinning provides identity traceability, not
+bit-for-bit rebuilds, because base-image package repositories move under a
+fixed digest. The vLLM Metal installer now verifies SHA-256 hashes of both
+pinned wheels before installation. The layout-export requirements file
+retains top-level pins only; its transitive lock remains a documented
+reproducibility gap until an owner authorizes a hash-locked regenerate.
+
+CI actions (`actions/checkout`, `dtolnay/rust-toolchain`) currently use
+mutable tags/`stable` with Trivy checksum-pinned; pinning them to full
+commit SHAs is the policy, but each pin must be a reviewed update — record
+the SHA in this file when adopted. The workspace declares
+`rust-version = 1.89`; reviewed evidence covers 1.98.1 (native) and 1.99.0
+(Linux ARM64) only, so the declared minimum is an **untested
+source-compatibility floor**, not a verified support matrix. Adding an MSRV
+CI leg doubles hosted Rust cost and needs an explicit owner decision; do
+not claim 1.89 support from current evidence.
+
 ## Remaining release gates
 
 - Three consecutive hosted CI successes have not been obtained; no push/remote publication is authorized by local verification.
