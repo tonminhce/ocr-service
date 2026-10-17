@@ -61,7 +61,15 @@ fn result_fixture() -> Value {
         "strategy": "course_layout_vlm", "model": "synthetic/test",
         "pages": [{"page_number": 1, "width": 1000, "height": 600,
                    "coordinate_system": "normalized_0_1000", "empty": false,
-                   "markdown": "", "regions": [], "coverage": {},
+                   "markdown": "", "coverage": {},
+                   "regions": [
+                       {"index": 0, "content": "Ben A (cho thue) — Ho ten: NGUOI MAU A.", "bbox_2d": [0,0,500,100],
+                        "polygon": [[0,0],[500,0],[500,100],[0,100]], "score": 0.9, "task_type": "text"},
+                       {"index": 1, "content": "CCCD so: 012345678901.", "bbox_2d": [0,150,500,200],
+                        "polygon": [[0,150],[500,150],[500,200],[0,200]], "score": 0.9, "task_type": "text"},
+                       {"index": 2, "content": "CCCD so: 012345678901. (verified copy)", "bbox_2d": [0,250,500,300],
+                        "polygon": [[0,250],[500,250],[500,300],[0,300]], "score": 0.9, "task_type": "text"}
+                   ],
                    "detections": [], "discarded": [], "raw_regions": []}],
         "layout": [], "markdown": ""
     })
@@ -84,10 +92,30 @@ fn export_sidecar(base: &Path) -> (Value, String) {
         v2_export::export(&extraction_path, &result_path, &source_sha, &sidecar_path).unwrap();
     assert_eq!(report.pages, 1);
     assert_eq!(report.entities, 3);
-    assert_eq!(report.transcripts, 1);
     assert!(report.fields >= 3);
     assert!(report.abstained_pages.is_empty());
+    assert!(report.region_bound_observations >= 1);
+    assert!(report.page_anchored_observations >= 1);
+    assert!(report.ambiguous_binds >= 1);
     let sidecar: Value = serde_json::from_slice(&std::fs::read(&sidecar_path).unwrap()).unwrap();
+    let bound = sidecar["observations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|observation| {
+            observation["field"] == "name"
+                && observation["anchor"]["polygon"]
+                    .as_array()
+                    .is_some_and(|polygon| {
+                        polygon.len() == 4
+                            && polygon[0][1].as_f64() == Some(0.0)
+                            && polygon[2][1].as_f64() == Some(60.0)
+                    })
+        });
+    assert!(
+        bound,
+        "the name observation must carry its region polygon scaled to page pixels"
+    );
     (sidecar, source_sha)
 }
 

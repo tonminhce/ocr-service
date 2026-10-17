@@ -36,7 +36,19 @@ pub struct ExportReport {
     pub fields: usize,
     pub unsupported_fields: Vec<String>,
     pub abstained_pages: Vec<u32>,
+    pub region_bound_observations: usize,
+    pub page_anchored_observations: usize,
+    pub ambiguous_binds: usize,
     pub limitations: Vec<String>,
+}
+
+fn polygon_area(polygon: &[[f64; 2]]) -> f64 {
+    let mut area = 0.0;
+    for index in 0..polygon.len() {
+        let next = (index + 1) % polygon.len();
+        area += polygon[index][0] * polygon[next][1] - polygon[next][0] * polygon[index][1];
+    }
+    (area / 2.0).abs()
 }
 
 fn sha256_hex(bytes: &[u8]) -> String {
@@ -156,6 +168,85 @@ pub fn export(
             .map(|(_, anchor)| anchor)
     };
 
+    struct RegionEntry {
+        anchor: serde_json::Value,
+        content: String,
+        index: u32,
+    }
+    let mut regions_by_page: Vec<(u32, Vec<RegionEntry>)> = Vec::new();
+    for page in &result_pages {
+        let number = page
+            .get("page_number")
+            .and_then(|n| n.as_u64())
+            .unwrap_or(0) as u32;
+        let width = page.get("width").and_then(|w| w.as_f64()).unwrap_or(0.0);
+        let height = page.get("height").and_then(|h| h.as_f64()).unwrap_or(0.0);
+        if width <= 0.0 || height <= 0.0 {
+            continue;
+        }
+        let mut entries = Vec::new();
+        if let Some(regions) = page.get("regions").and_then(|r| r.as_array()) {
+            for region in regions {
+                let Some(content) = region.get("content").and_then(|c| c.as_str()) else {
+                    continue;
+                };
+                if content.trim().is_empty() {
+                    continue;
+                }
+                let Some(polygon) = region.get("polygon").and_then(|p| p.as_array()) else {
+                    continue;
+                };
+                if polygon.len() < 3 || polygon.len() > 16 {
+                    continue;
+                }
+                let mut scaled: Vec<[f64; 2]> = Vec::with_capacity(polygon.len());
+                let mut degenerate = false;
+                for vertex in polygon {
+                    let Some(pair) = vertex.as_array() else {
+                        degenerate = true;
+                        break;
+                    };
+                    if pair.len() != 2 {
+                        degenerate = true;
+                        break;
+                    }
+                    let x = pair[0].as_f64().unwrap_or(-1.0) * width / 1000.0;
+                    let y = pair[1].as_f64().unwrap_or(-1.0) * height / 1000.0;
+                    if !(x.is_finite() && y.is_finite()) {
+                        degenerate = true;
+                        break;
+                    }
+                    scaled.push([x.clamp(0.0, width), y.clamp(0.0, height)]);
+                }
+                if degenerate {
+                    continue;
+                }
+                if polygon_area(&scaled) <= 0.01 {
+                    continue;
+                }
+                let index = region.get("index").and_then(|i| i.as_u64()).unwrap_or(0) as u32;
+                entries.push(RegionEntry {
+                    anchor: serde_json::json!({
+                        "page_number": number,
+                        "source_kind": "contract",
+                        "side": "not_applicable",
+                        "granularity": "block",
+                        "polygon": scaled,
+                    }),
+                    content: content.to_string(),
+                    index,
+                });
+            }
+        }
+        regions_by_page.push((number, entries));
+    }
+    let regions_for_page = |number: u32| -> Option<&Vec<RegionEntry>> {
+        regions_by_page
+            .iter()
+            .find(|(page_number, _)| *page_number == number)
+            .map(|(_, entries)| entries)
+    };
+
     let page_number_of_artifact = |artifact_id: &str| -> Option<u32> {
         artifacts
             .iter()
@@ -266,7 +357,47 @@ pub fn export(
 
     let mut observations = Vec::new();
     let mut exported_fields = Vec::new();
+    struct RegionBind {
+        transcript_id: String,
+        anchor: serde_json::Value,
+        content: String,
+        byte_start: usize,
+        byte_end: usize,
+    }
+    let bind_region = |page: u32, quote: &str| -> Result<Option<RegionBind>, usize> {
+        let Some(entries) = regions_for_page(page) else {
+            return Ok(None);
+        };
+        let mut matches = entries
+            .iter()
+            .filter_map(|entry| {
+                entry
+                    .content
+                    .as_bytes()
+                    .windows(quote.len().max(1))
+                    .position(|window| window == quote.as_bytes())
+                    .map(|start| (entry, start))
+            })
+            .collect::<Vec<_>>();
+        match matches.len() {
+            1 => {
+                let (entry, start) = matches.remove(0);
+                Ok(Some(RegionBind {
+                    transcript_id: format!("{}_r{}", entry.anchor["page_number"], entry.index),
+                    anchor: entry.anchor.clone(),
+                    content: entry.content.clone(),
+                    byte_start: start,
+                    byte_end: start + quote.len(),
+                }))
+            }
+            0 => Ok(None),
+            other => Err(other),
+        }
+    };
     let mut unsupported = Vec::new();
+    let mut region_bound_observations = 0usize;
+    let mut page_anchored_observations = 0usize;
+    let mut ambiguous_binds = 0usize;
     let mut observation_sequence = 0usize;
     for (path, field) in &fields {
         let Some((party, field_key)) = parse_field_path(path) else {
@@ -360,10 +491,39 @@ pub fn export(
                     );
                     let page = page_number_of_artifact(artifact_id)
                         .context("evidence artifact lacks a page")?;
+                    let span = evidence.get("span").context("evidence lacks a span")?;
+                    let binding = bind_region(page, quote);
+                    if let Err(matches) = binding {
+                        let _ = matches;
+                        ambiguous_binds += 1;
+                    } else if let Some(bind) = binding.unwrap() {
+                        region_bound_observations += 1;
+                        if !transcript_ids.contains(&bind.transcript_id) {
+                            transcripts.push(serde_json::json!({
+                                "id": bind.transcript_id,
+                                "text": bind.content,
+                                "anchor": bind.anchor,
+                            }));
+                            transcript_ids.push(bind.transcript_id.clone());
+                        }
+                        emit_observation(
+                            quote,
+                            value,
+                            "present",
+                            "first_pass",
+                            &bind.anchor,
+                            &bind.transcript_id,
+                            bind.byte_start,
+                            bind.byte_end,
+                            &mut observations,
+                            &mut field_observation_ids,
+                        );
+                        continue;
+                    }
                     let Some(anchor) = anchor_for_page(page) else {
                         continue;
                     };
-                    let span = evidence.get("span").context("evidence lacks a span")?;
+                    page_anchored_observations += 1;
                     emit_observation(
                         quote,
                         value,
@@ -468,9 +628,6 @@ pub fn export(
                         .context("candidate evidence lacks an artifact reference")?;
                     let page = page_number_of_artifact(artifact_id)
                         .context("evidence artifact lacks a page")?;
-                    let Some(anchor) = anchor_for_page(page) else {
-                        continue;
-                    };
                     let span = evidence
                         .get("span")
                         .context("candidate evidence lacks a span")?;
@@ -483,6 +640,39 @@ pub fn export(
                     } else {
                         "first_pass"
                     };
+                    let binding = bind_region(page, quote);
+                    if let Err(matches) = binding {
+                        let _ = matches;
+                        ambiguous_binds += 1;
+                    } else if let Some(bind) = binding.unwrap() {
+                        region_bound_observations += 1;
+                        if !transcript_ids.contains(&bind.transcript_id) {
+                            transcripts.push(serde_json::json!({
+                                "id": bind.transcript_id,
+                                "text": bind.content,
+                                "anchor": bind.anchor,
+                            }));
+                            transcript_ids.push(bind.transcript_id.clone());
+                        }
+                        emit_observation(
+                            quote,
+                            Some(value),
+                            "present",
+                            origin,
+                            &bind.anchor,
+                            &bind.transcript_id,
+                            bind.byte_start,
+                            bind.byte_end,
+                            &mut observations,
+                            &mut field_observation_ids,
+                        );
+                        emitted_any = true;
+                        continue;
+                    }
+                    let Some(anchor) = anchor_for_page(page) else {
+                        continue;
+                    };
+                    page_anchored_observations += 1;
                     emit_observation(
                         quote,
                         Some(value),
@@ -554,8 +744,11 @@ pub fn export(
         fields: exported_fields.len(),
         unsupported_fields: unsupported,
         abstained_pages,
+        region_bound_observations,
+        page_anchored_observations,
+        ambiguous_binds,
         limitations: vec![
-            "Anchors use full-page rectangles at block granularity; region-precise geometry requires the future layout-registry adapter.".into(),
+            "Observations bind to real region polygons where a quote uniquely matches one stored layout region; page-rectangle fallback is used otherwise.".into(),
             "Card entities are outside the current supported scope and are not exported.".into(),
             "This machine sidecar does not prove OCR accuracy; independent gold remains the quality gate.".into(),
         ],
