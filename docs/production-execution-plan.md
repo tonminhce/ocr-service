@@ -2,6 +2,8 @@
 
 Ngày 16/10/2026 — **M1 verified local; A03–A06/O01 verified trong phạm vi cô lập; continuation đã kiểm course-layout slow-model smoke và local rollback; O02 hosted/provenance, production adoption và quality/capacity còn gate riêng**. Xem [trace tiếp nối Copilot](session-resume-2026-10-16.md).
 
+Bàn giao ngày17/10: [deep review có evidence](production-deep-review-2026-10-17.md), [18 gói thực thi H00–H17](production-agent-execution-plan-2026-10-17.md) và [prompt/harness cho agent tiếp theo](production-executor-harness-2026-10-17.md). Đây là review/kế hoạch theo yêu cầu mới, không phải các gói đã được triển khai; [review trace](production-deep-review-execution-trace-2026-10-17.md) giữ phạm vi và verification riêng.
+
 Tài liệu chuyển [roadmap nghiên cứu](production-next-roadmap.md) thành các gói thực thi có phụ thuộc, code liên quan, kiểm thử và điều kiện phát hành. Đợt đầu P00/A01/A02/B01/B02/E01 có kết quả trong [M1 execution review](m1-execution-review.md). A03 và A04 đã kiểm trên DB/volumes mới trong [A03 execution trace](a03-execution-trace.md) và [A04 execution trace](a04-execution-trace.md); [E02 memory audit](e02-memory-audit.md) đã xác định retained process và kiểm observer. Live M1 chưa cut over; retention apply, đổi model và concurrency sweep chưa thực hiện. Những gói không được đánh dấu thực thi bên dưới vẫn là kế hoạch.
 
 | Gói | Trạng thái thực thi |
