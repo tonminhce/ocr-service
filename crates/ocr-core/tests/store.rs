@@ -1332,6 +1332,121 @@ async fn durable_dispatch_replays_after_restart_and_failed_publish_is_fenced() {
 
 #[tokio::test]
 #[ignore = "requires TEST_DATABASE_URL"]
+async fn mark_dispatched_rechecks_expiry_after_unchanged_outbox_lock_wait() {
+    let db = TestDatabase::new().await;
+    let id = db.store.submit(document(None)).await.unwrap().job.id;
+    let leased = db.store.claim_outbox(1, 30).await.unwrap().remove(0);
+    sqlx::query(
+        "UPDATE job_outbox SET dispatch_lease_expires_at = clock_timestamp() + INTERVAL '900 milliseconds' \
+         WHERE job_id = $1",
+    )
+    .bind(id)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    let before: (
+        Option<Uuid>,
+        Option<chrono::DateTime<chrono::Utc>>,
+        chrono::DateTime<chrono::Utc>,
+    ) = sqlx::query_as(
+        "SELECT dispatch_token, dispatch_lease_expires_at, next_dispatch_at \
+             FROM job_outbox WHERE job_id = $1",
+    )
+    .bind(id)
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    let mut blocker = db.pool.begin().await.unwrap();
+    sqlx::query("SELECT job_id FROM job_outbox WHERE job_id = $1 FOR UPDATE")
+        .bind(id)
+        .execute(&mut *blocker)
+        .await
+        .unwrap();
+    let blocker_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *blocker)
+        .await
+        .unwrap();
+    let store = db.store.clone();
+    let token = leased.token;
+    let pending = tokio::spawn(async move { store.mark_dispatched(id, token, 30).await });
+    tokio::time::timeout(std::time::Duration::from_millis(700), async {
+        loop {
+            let blocked: bool = sqlx::query_scalar(
+                "SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE $1=ANY(pg_blocking_pids(pid)))",
+            )
+            .bind(blocker_pid)
+            .fetch_one(&db.pool)
+            .await
+            .unwrap();
+            if blocked {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("mark_dispatched must wait on the unchanged outbox row while its lease is live");
+    let live: bool = sqlx::query_scalar(
+        "SELECT dispatch_lease_expires_at > clock_timestamp() FROM job_outbox WHERE job_id = $1",
+    )
+    .bind(id)
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    assert!(
+        live,
+        "mark_dispatched must reach the unchanged lock before its lease expires"
+    );
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        loop {
+            let expired: bool = sqlx::query_scalar(
+                "SELECT dispatch_lease_expires_at <= clock_timestamp() FROM job_outbox WHERE job_id = $1",
+            )
+            .bind(id)
+            .fetch_one(&db.pool)
+            .await
+            .unwrap();
+            if expired {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .unwrap();
+    blocker.rollback().await.unwrap();
+    assert!(
+        !pending.await.unwrap().unwrap(),
+        "a dispatch lease that expired during an unchanged row-lock wait must never authorize the mark"
+    );
+    let after: (
+        Option<Uuid>,
+        Option<chrono::DateTime<chrono::Utc>>,
+        chrono::DateTime<chrono::Utc>,
+    ) = sqlx::query_as(
+        "SELECT dispatch_token, dispatch_lease_expires_at, next_dispatch_at \
+             FROM job_outbox WHERE job_id = $1",
+    )
+    .bind(id)
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        before, after,
+        "rejected late mark must leave token, deadline and next dispatch unchanged"
+    );
+    db.make_dispatch_due(id).await;
+    let fresh = db.store.claim_outbox(1, 30).await.unwrap().remove(0);
+    assert_ne!(fresh.token, leased.token);
+    assert!(
+        db.store.mark_dispatched(id, fresh.token, 30).await.unwrap(),
+        "a current dispatcher must still be able to claim and mark"
+    );
+    db.cleanup().await;
+}
+
+#[tokio::test]
+#[ignore = "requires TEST_DATABASE_URL"]
 async fn retries_reset_publication_tokens_and_respect_the_available_time() {
     let db = TestDatabase::new().await;
     let id = db.store.submit(document(None)).await.unwrap().job.id;

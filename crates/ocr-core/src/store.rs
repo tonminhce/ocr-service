@@ -480,6 +480,19 @@ impl Store {
         token: Uuid,
         redispatch_seconds: i64,
     ) -> Result<bool, StoreError> {
+        let mut transaction = self.pool.begin().await?;
+        sqlx::query("SELECT set_config('lock_timeout','2s',true), set_config('statement_timeout','5s',true)")
+            .execute(&mut *transaction)
+            .await?;
+        let locked: Option<Uuid> =
+            sqlx::query_scalar("SELECT job_id FROM job_outbox WHERE job_id = $1 FOR UPDATE")
+                .bind(job_id)
+                .fetch_optional(&mut *transaction)
+                .await?;
+        if locked.is_none() {
+            transaction.rollback().await?;
+            return Ok(false);
+        }
         let changed = sqlx::query(
             "UPDATE job_outbox SET \
                 next_dispatch_at = clock_timestamp() + ($3::bigint * INTERVAL '1 second'), \
@@ -490,8 +503,9 @@ impl Store {
         .bind(job_id)
         .bind(token)
         .bind(redispatch_seconds)
-        .execute(&self.pool)
+        .execute(&mut *transaction)
         .await?;
+        transaction.commit().await?;
         Ok(changed.rows_affected() == 1)
     }
 
