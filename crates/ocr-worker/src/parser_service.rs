@@ -1322,6 +1322,87 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore = "measurement probe: prints per-operation IPC timing to stderr"]
+    async fn parser_ipc_round_trip_overhead_probe() {
+        use crate::parser_protocol::RenderProfile;
+
+        let server = TestServer::start().await;
+        let input = include_bytes!("../tests/fixtures/two_pages.pdf").to_vec();
+        let limits = crate::parser_client::ParserLimits::default();
+        let session = crate::parser_client::ParserSession::open(
+            &server.path,
+            input,
+            "application/pdf",
+            limits,
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(session.page_count(), 2);
+
+        for _ in 0..2 {
+            session
+                .page_info(1, CancellationToken::new())
+                .await
+                .unwrap();
+            session
+                .render_rgb(1, RenderProfile::FullPage, CancellationToken::new())
+                .await
+                .unwrap();
+        }
+
+        let mut info_times = Vec::new();
+        let mut full_times = Vec::new();
+        let mut course_times = Vec::new();
+        let mut cycle_times = Vec::new();
+        for _ in 0..10 {
+            let cycle_start = Instant::now();
+            let started = Instant::now();
+            let (width_points, height_points) = session
+                .page_info(1, CancellationToken::new())
+                .await
+                .unwrap();
+            info_times.push(started.elapsed().as_secs_f64() * 1000.0);
+            let started = Instant::now();
+            let full = session
+                .render_rgb(1, RenderProfile::FullPage, CancellationToken::new())
+                .await
+                .unwrap();
+            full_times.push(started.elapsed().as_secs_f64() * 1000.0);
+            let started = Instant::now();
+            let course = session
+                .render_rgb(2, RenderProfile::CourseLayout, CancellationToken::new())
+                .await
+                .unwrap();
+            course_times.push(started.elapsed().as_secs_f64() * 1000.0);
+            cycle_times.push(cycle_start.elapsed().as_secs_f64() * 1000.0);
+            assert!((width_points, height_points).0 > 0.0);
+            assert!(full.width() > 0 && full.height() > 0);
+            assert!(course.width() > 0 && course.height() > 0);
+        }
+
+        let pct = |values: &[f64], quantile: f64| {
+            let mut sorted = values.to_vec();
+            sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            let index = ((sorted.len() as f64 - 1.0) * quantile).round() as usize;
+            sorted[index.min(sorted.len() - 1)]
+        };
+        eprintln!(
+            "parser_ipc_overhead_probe={}",
+            serde_json::json!({
+                "samples": 10,
+                "page_info_ms": {"p50": pct(&info_times, 0.5), "p95": pct(&info_times, 0.95)},
+                "render_full_page_ms": {"p50": pct(&full_times, 0.5), "p95": pct(&full_times, 0.95)},
+                "render_course_page_ms": {"p50": pct(&course_times, 0.5), "p95": pct(&course_times, 0.95)},
+                "cycle_ms": {"p50": pct(&cycle_times, 0.5), "p95": pct(&cycle_times, 0.95)},
+                "fixture": "synthetic two_pages.pdf",
+                "pages": 2,
+                "scope": "in-process parser service over the production Unix socket; ARM64 host; not OCR capacity"
+            })
+        );
+    }
+
+    #[tokio::test]
     async fn pdf_render_and_native_text_match_the_existing_poppler_semantics() {
         use crate::{
             child_process,
