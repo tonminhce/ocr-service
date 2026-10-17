@@ -131,3 +131,12 @@ verification, measurement, adoption. Never relabel a gate to close it.
   headroom: host free 23%, swap 11.95/13.31 GiB), H11 machine-only v2
   sidecar. H07 local candidate waits on freezing H01–H06 (now frozen at
   50bd4cd) and a build/rehearsal budget decision.
+
+## Change log (round 2)
+
+- 2026-10-18: H11 `2a90f08` (machine-only v2 sidecar exporter; loader/scorer
+  acceptance + tamper rejection + determinism + abstention tests); H09 READY
+  slice `c55a843` (combined API transport pressure envelope: upload/slow-
+  reader/status/cancellation invariants + RSS plateau, 329/0/91 workspace).
+  H07 local candidate: H01–H06 frozen; build+rehearsal budget decision remains
+  (Docker build time/disk vs. host pressure) before the canonical image run.
