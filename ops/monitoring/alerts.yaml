@@ -123,6 +123,32 @@ groups:
     annotations:
       summary: Worker database connections are mostly busy
       runbook: docs/alert-runbook.md#ocrpoolsaturation
+  - alert: OCRRuleEvaluationFailing
+    expr: increase(prometheus_rule_evaluation_failures_total{job="prometheus"}[5m]) > 0
+    for: 1m
+    labels:
+      severity: critical
+      policy: candidate-v1
+    annotations:
+      summary: Prometheus rule evaluation is failing; monitoring output cannot be trusted
+      runbook: docs/alert-runbook.md#ocrruleevaluationfailing
+  - alert: OCRNotificationDeliveryFailing
+    expr: sum by (integration) (increase(alertmanager_notifications_failed_total{job="alertmanager"}[5m])) > 0
+    for: 2m
+    labels:
+      severity: critical
+      policy: candidate-v1
+    annotations:
+      summary: Alertmanager notification delivery is failing
+      runbook: docs/alert-runbook.md#ocrnotificationdeliveryfailing
+  - alert: OCRMonitoringDeadMan
+    expr: vector(1) and on() (up{job="prometheus"} == 1)
+    labels:
+      severity: none
+      policy: candidate-v1
+    annotations:
+      summary: Monitoring heartbeat; this alert firing is healthy silence from the watchdog perspective
+      runbook: docs/alert-runbook.md#ocrmonitoringdeadman
   - alert: OCRRedisMemoryHigh
     expr: max by (job) ((ocr_operational_redis_memory_bytes{job="ocr-worker"} and on (job, instance) ocr:operational_fresh) / on (job, instance) (ocr_operational_redis_maxmemory_bytes{job="ocr-worker"}
       > 0)) > 0.85

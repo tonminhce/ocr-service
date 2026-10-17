@@ -175,6 +175,27 @@ Shared PostgreSQL/Redis gauges are filtered against each reporting instance's fr
 - **Recovery:** confirm backlog/PEL progress and stable memory below the approved threshold without deleting durable work or pending acknowledgements. Treat rejected writes and allocation pressure separately.
 - **Escalate:** Redis/capacity owner before the measured safety margin is exhausted; do not raise container/maxmemory budgets or flush data as automatic remediation.
 
+## OCRRuleEvaluationFailing
+
+- **Meaning/hold:** Prometheus reports rule-evaluation failures over five minutes. Monitoring output can no longer be trusted while this fires; a monitoring stack that cannot evaluate its own rules is not evidence of system health.
+- **Inspect:** Prometheus targets page, `prometheus_rule_evaluation_failures_total`, rule-group errors and recent config changes. Bad rule syntax or a broken recording expression is the usual cause.
+- **Recovery:** fix the rule/config error and confirm failures stop increasing and the affected alerts evaluate again. Do not silence this alert to make a broken stack look healthy.
+- **Escalate:** monitoring owner; treat all other quiet alerts as unknown during the outage.
+
+## OCRNotificationDeliveryFailing
+
+- **Meaning/hold:** Alertmanager notification attempts failed over five minutes for at least one integration. With the current local-only receiver this means the last delivery hop is broken; once a real receiver is configured it means human paging is not reaching its destination.
+- **Inspect:** Alertmanager UI, `alertmanager_notifications_failed_total` by integration, receiver endpoint reachability from inside the Compose network.
+- **Recovery:** restore the integration endpoint; verify delivery with a synthetic alert. Real receiver configuration and an out-of-band watchdog remain owner gates — local Alertmanager success is not human paging.
+- **Escalate:** on-call/owner once a real receiver exists; until then treat as monitoring-stack fault.
+
+## OCRMonitoringDeadMan
+
+- **Meaning/hold:** this alert fires continuously while Prometheus is up and evaluating. An external watchdog that stops seeing it must raise an out-of-band alarm: the monitoring stack itself is down, restart-looping, or not evaluating rules.
+- **Inspect:** if the dead man is quiet while Prometheus looks healthy, check rule evaluation, scrape config and the watchdog's own transport. `up{job="prometheus"}` disappearing stops the dead man by design.
+- **Recovery:** restore the Prometheus self-scrape/evaluation; the dead man resumes firing without operator action.
+- **Escalate:** monitoring owner via the out-of-band channel (email/SMS/external probe); this is the one signal intentionally routed outside the monitored stack, and configuring that external route is an owner decision.
+
 ## Resource and production acceptance limits
 
 The candidate gives Prometheus 0.5 CPU, 256MiB memory, 64 PIDs, 24-hour retention and a 1GB retention-size target; Alertmanager has 0.25 CPU, 128MiB memory, 64 PIDs and 24-hour data retention. These are bounded starting values, not measured sizing for production. Query/sample/body limits protect the process but can also cause a failed scrape/query; investigate before weakening them.

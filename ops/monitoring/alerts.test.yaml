@@ -1117,3 +1117,81 @@ tests:
   - eval_time: 300s
     alertname: OCRRedisMemoryHigh
     exp_alerts: []
+- name: OCRRuleEvaluationFailing fires once evaluation failures increase
+  interval: 15s
+  input_series:
+  - series: up{job="prometheus",instance="prometheus:9090"}
+    values: 1x40
+  - series: prometheus_rule_evaluation_failures_total{job="prometheus",instance="prometheus:9090"}
+    values: 0x10 1+0x29
+  alert_rule_test:
+  - eval_time: 60s
+    alertname: OCRRuleEvaluationFailing
+    exp_alerts: []
+  - eval_time: 360s
+    alertname: OCRRuleEvaluationFailing
+    exp_alerts:
+    - exp_labels:
+        job: prometheus
+        instance: prometheus:9090
+        severity: critical
+        policy: candidate-v1
+      exp_annotations:
+        summary: Prometheus rule evaluation is failing; monitoring output cannot be trusted
+        runbook: docs/alert-runbook.md#ocrruleevaluationfailing
+- name: OCRRuleEvaluationFailing stays quiet with no failures
+  interval: 15s
+  input_series:
+  - series: up{job="prometheus",instance="prometheus:9090"}
+    values: 1x40
+  - series: prometheus_rule_evaluation_failures_total{job="prometheus",instance="prometheus:9090"}
+    values: 0x40
+  alert_rule_test:
+  - eval_time: 360s
+    alertname: OCRRuleEvaluationFailing
+    exp_alerts: []
+- name: OCRNotificationDeliveryFailing fires while delivery keeps failing
+  interval: 15s
+  input_series:
+  - series: up{job="alertmanager",instance="alertmanager:9093"}
+    values: 1x40
+  - series: alertmanager_notifications_failed_total{job="alertmanager",instance="alertmanager:9093",integration="null"}
+    values: 0x8 1+0x31
+  alert_rule_test:
+  - eval_time: 120s
+    alertname: OCRNotificationDeliveryFailing
+    exp_alerts: []
+  - eval_time: 300s
+    alertname: OCRNotificationDeliveryFailing
+    exp_alerts:
+    - exp_labels:
+        integration: "null"
+        severity: critical
+        policy: candidate-v1
+      exp_annotations:
+        summary: Alertmanager notification delivery is failing
+        runbook: docs/alert-runbook.md#ocrnotificationdeliveryfailing
+- name: OCRMonitoringDeadMan fires while the monitoring stack evaluates itself
+  interval: 15s
+  input_series:
+  - series: up{job="prometheus",instance="prometheus:9090"}
+    values: 1x40
+  alert_rule_test:
+  - eval_time: 60s
+    alertname: OCRMonitoringDeadMan
+    exp_alerts:
+    - exp_labels:
+        severity: none
+        policy: candidate-v1
+      exp_annotations:
+        summary: Monitoring heartbeat; this alert firing is healthy silence from the watchdog perspective
+        runbook: docs/alert-runbook.md#ocrmonitoringdeadman
+- name: OCRMonitoringDeadMan stops firing when the self-scrape disappears
+  interval: 15s
+  input_series:
+  - series: up{job="prometheus",instance="prometheus:9090"}
+    values: 1x2 0x37
+  alert_rule_test:
+  - eval_time: 60s
+    alertname: OCRMonitoringDeadMan
+    exp_alerts: []

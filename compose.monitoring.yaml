@@ -25,6 +25,11 @@ services:
       - ./ops/monitoring:/etc/ocr-monitoring:ro
       - prometheus-data:/prometheus
     secrets: [metrics_token]
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
     ports: ["127.0.0.1:${MONITORING_PROMETHEUS_PORT:-9290}:9090"]
     tmpfs: ["/tmp:size=16m,mode=1777"]
     depends_on:
@@ -52,6 +57,11 @@ services:
     volumes:
       - ./ops/monitoring:/etc/ocr-monitoring:ro
       - alertmanager-data:/alertmanager
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
     ports: ["127.0.0.1:${MONITORING_ALERTMANAGER_PORT:-9293}:9093"]
     tmpfs: ["/tmp:size=16m,mode=1777"]
 
