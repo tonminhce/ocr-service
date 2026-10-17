@@ -242,18 +242,19 @@ impl ParserSession {
         cancelled: CancellationToken,
     ) -> Result<Frame, ProcessingError> {
         let mut stream = lock_stream(&self.stream, self.timeout, &cancelled).await?;
-        let Some(socket) = stream.as_mut() else {
-            return Err(parser_unavailable());
+        let mut socket = match stream.take() {
+            Some(socket) => socket,
+            None => return Err(parser_unavailable()),
         };
         let frame = Frame {
             operation,
             data: Vec::new(),
         };
         let exchange = async {
-            write_frame(socket, FrameKind::Request, &frame, REQUEST_DATA_LIMIT)
+            write_frame(&mut socket, FrameKind::Request, &frame, REQUEST_DATA_LIMIT)
                 .await
                 .map_err(protocol_error)?;
-            read_frame(socket, FrameKind::Response, RESPONSE_DATA_LIMIT)
+            read_frame(&mut socket, FrameKind::Response, RESPONSE_DATA_LIMIT)
                 .await
                 .map_err(protocol_error)
         };
@@ -266,9 +267,13 @@ impl ParserSession {
             },
         };
         match result {
-            Ok(frame) => operation_result(frame),
+            Ok(frame) => {
+                let outcome = operation_result(frame);
+                *stream = Some(socket);
+                outcome
+            }
             Err(error) => {
-                stream.take();
+                drop(socket);
                 Err(error)
             }
         }
@@ -784,5 +789,269 @@ mod tests {
             "isolated parser returned an invalid response"
         );
         helper.await.unwrap();
+    }
+
+    async fn two_render_session() -> (ParserSession, UnixStream, TempDir) {
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let socket_directory = directory.path().join("socket");
+        std::fs::create_dir(&socket_directory).unwrap();
+        std::fs::set_permissions(&socket_directory, std::fs::Permissions::from_mode(0o700))
+            .unwrap();
+        let socket_path = socket_directory.join("parser.sock");
+        let listener = UnixListener::bind(&socket_path).unwrap();
+        let (server_tx, server_rx) = oneshot::channel::<UnixStream>();
+        let handshake = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let open = read_frame(&mut stream, FrameKind::Request, REQUEST_DATA_LIMIT)
+                .await
+                .unwrap();
+            assert!(matches!(open.operation, Operation::Open { .. }));
+            write_frame(
+                &mut stream,
+                FrameKind::Response,
+                &Frame {
+                    operation: Operation::Admitted,
+                    data: Vec::new(),
+                },
+                RESPONSE_DATA_LIMIT,
+            )
+            .await
+            .unwrap();
+            let upload = read_frame(&mut stream, FrameKind::Request, REQUEST_DATA_LIMIT)
+                .await
+                .unwrap();
+            assert_eq!(upload.operation, Operation::Upload);
+            write_frame(
+                &mut stream,
+                FrameKind::Response,
+                &Frame {
+                    operation: Operation::Opened { pages: 2 },
+                    data: Vec::new(),
+                },
+                RESPONSE_DATA_LIMIT,
+            )
+            .await
+            .unwrap();
+            let _ = server_tx.send(stream);
+        });
+        let limits = ParserLimits {
+            max_pages: 2,
+            max_pixels: 4000,
+            max_image_edge: 40,
+            render_dpi: 144,
+            page_max_edge: 40,
+            timeout_seconds: 3,
+            session_timeout_seconds: 30,
+        };
+        let session = timeout(
+            Duration::from_secs(5),
+            ParserSession::open(
+                &socket_path,
+                b"%PDF-synthetic-two-pages".to_vec(),
+                "application/pdf",
+                limits,
+                CancellationToken::new(),
+            ),
+        )
+        .await
+        .expect("session open handshake must complete")
+        .expect("session open must succeed");
+        handshake.await.unwrap();
+        let server = timeout(Duration::from_secs(5), server_rx)
+            .await
+            .expect("server stream must be delivered")
+            .expect("handshake task must not fail");
+        (session, server, directory)
+    }
+
+    fn rgb_frame(width: u32, height: u32) -> Frame {
+        Frame {
+            operation: Operation::RgbResult { width, height },
+            data: vec![128; (width as usize) * (height as usize) * 3],
+        }
+    }
+
+    #[tokio::test]
+    async fn aborted_request_fails_closed_against_delayed_stale_response() {
+        let (session, mut server, _directory) = two_render_session().await;
+        let page1 = session.render_rgb(1, RenderProfile::CourseLayout, CancellationToken::new());
+        let mut page1 = Box::pin(page1);
+        let (request_sent, request_arrived) = oneshot::channel::<()>();
+        let mut request_arrived = std::pin::pin!(request_arrived);
+        timeout(Duration::from_secs(2), async {
+            let read_request = async {
+                let first = read_frame(&mut server, FrameKind::Request, REQUEST_DATA_LIMIT)
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    first.operation,
+                    Operation::RenderRgb {
+                        page: 1,
+                        profile: RenderProfile::CourseLayout,
+                    }
+                );
+                let _ = request_sent.send(());
+            };
+            tokio::select! {
+                _ = &mut request_arrived => {}
+                _ = read_request => {}
+                _ = &mut page1 => panic!("page1 resolved before its response was withheld"),
+            }
+        })
+        .await
+        .expect("first render request must reach the server while page1 stays pending");
+        drop(page1);
+        let stale_write = write_frame(
+            &mut server,
+            FrameKind::Response,
+            &rgb_frame(20, 10),
+            RESPONSE_DATA_LIMIT,
+        )
+        .await;
+        assert!(
+            stale_write.is_err(),
+            "client must have closed the aborted exchange socket"
+        );
+        let page2 = session.render_rgb(2, RenderProfile::CourseLayout, CancellationToken::new());
+        let result = timeout(Duration::from_secs(2), page2).await;
+        let outcome = result.expect("second render must not hang after stale response");
+        match outcome {
+            Ok(image) => panic!(
+                "stale page-1 response was accepted as page 2: {}x{}",
+                image.width(),
+                image.height()
+            ),
+            Err(error) => {
+                assert!(
+                    error.retryable,
+                    "stale-response rejection must be transient, got {error:?}"
+                );
+            }
+        }
+        let _ = server.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn aborted_request_after_partial_header_fails_closed_on_reuse() {
+        let (session, mut server, _directory) = two_render_session().await;
+        let page1 = session.render_rgb(1, RenderProfile::CourseLayout, CancellationToken::new());
+        let mut page1 = Box::pin(page1);
+        let (header_sent, header_arrived) = oneshot::channel::<()>();
+        let mut header_arrived = std::pin::pin!(header_arrived);
+        timeout(Duration::from_secs(2), async {
+            let serve_partial = async {
+                let first = read_frame(&mut server, FrameKind::Request, REQUEST_DATA_LIMIT)
+                    .await
+                    .unwrap();
+                assert!(matches!(first.operation, Operation::RenderRgb { .. }));
+                let mut header = Vec::from(*b"OCRP");
+                header.extend_from_slice(&PROTOCOL_VERSION.to_be_bytes());
+                header.extend_from_slice(&(FrameKind::Response as u16).to_be_bytes());
+                header.extend_from_slice(&1_u32.to_be_bytes());
+                header.extend_from_slice(&(600_u64).to_be_bytes());
+                server.write_all(&header[..header.len() - 2]).await.unwrap();
+                let _ = header_sent.send(());
+            };
+            tokio::select! {
+                _ = &mut header_arrived => {}
+                _ = serve_partial => {}
+                _ = &mut page1 => panic!("page1 resolved before partial header was withheld"),
+            }
+        })
+        .await
+        .expect("partial header must reach page1 while it stays pending");
+        drop(page1);
+        let page2 = session.render_rgb(2, RenderProfile::CourseLayout, CancellationToken::new());
+        let result = timeout(Duration::from_secs(2), page2).await;
+        let outcome = result.expect("reuse after partial-header abort must not hang");
+        match outcome {
+            Ok(image) => panic!(
+                "partial stale header let page 2 through: {}x{}",
+                image.width(),
+                image.height()
+            ),
+            Err(error) => assert!(
+                error.retryable,
+                "partial-header rejection must be transient, got {error:?}"
+            ),
+        }
+        let _ = server.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn sequential_renders_on_one_session_still_succeed() {
+        let (session, mut server, _directory) = two_render_session().await;
+        let first = session.render_rgb(1, RenderProfile::CourseLayout, CancellationToken::new());
+        let mut first = Box::pin(first);
+        timeout(Duration::from_secs(2), async {
+            let serve = async {
+                let request = read_frame(&mut server, FrameKind::Request, REQUEST_DATA_LIMIT)
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    request.operation,
+                    Operation::RenderRgb {
+                        page: 1,
+                        profile: RenderProfile::CourseLayout,
+                    }
+                );
+                write_frame(
+                    &mut server,
+                    FrameKind::Response,
+                    &rgb_frame(20, 10),
+                    RESPONSE_DATA_LIMIT,
+                )
+                .await
+                .unwrap();
+            };
+            tokio::select! {
+                _ = serve => {}
+                result = &mut first => panic!("first render finished without a server: {result:?}"),
+            }
+        })
+        .await
+        .expect("first render request must be served");
+        let image = timeout(Duration::from_secs(2), first.as_mut())
+            .await
+            .expect("first render must complete")
+            .expect("first render must succeed");
+        assert_eq!((image.width(), image.height()), (20, 10));
+        let second = session.render_rgb(2, RenderProfile::CourseLayout, CancellationToken::new());
+        let mut second = Box::pin(second);
+        timeout(Duration::from_secs(2), async {
+            let serve = async {
+                let request = read_frame(&mut server, FrameKind::Request, REQUEST_DATA_LIMIT)
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    request.operation,
+                    Operation::RenderRgb {
+                        page: 2,
+                        profile: RenderProfile::CourseLayout,
+                    }
+                );
+                write_frame(
+                    &mut server,
+                    FrameKind::Response,
+                    &rgb_frame(10, 20),
+                    RESPONSE_DATA_LIMIT,
+                )
+                .await
+                .unwrap();
+            };
+            tokio::select! {
+                _ = serve => {}
+                result = &mut second => panic!("second render finished without a server: {result:?}"),
+            }
+        })
+        .await
+        .expect("second render request must be served");
+        let image = timeout(Duration::from_secs(2), second.as_mut())
+            .await
+            .expect("second render must complete")
+            .expect("second render must succeed");
+        assert_eq!((image.width(), image.height()), (10, 20));
+        let _ = server.shutdown().await;
     }
 }
