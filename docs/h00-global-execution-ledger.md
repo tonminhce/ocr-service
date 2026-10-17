@@ -166,3 +166,13 @@ verification, measurement, adoption. Never relabel a gate to close it.
   disposable stack RETAINED per no-deletion rule (inventoried in trace).
   Quality-qualified capacity, burst/soak rungs and real-model runs stay
   owner/data gated.
+
+## Change log (round 5)
+
+- 2026-10-18: Complete ignored-suite verification `7d8815a` — all 91
+  ignored integration tests executed serially on fresh disposable
+  PostgreSQL/Redis fixtures and PASSED (91/0/0 remaining), including the
+  cgroup-explicit worker/api cases and the roles-bootstrapped
+  administration/restore_target suites. Three fixture-setup corrections
+  preserved. Fixtures removed by exact name; 13 originals intact. The
+  "ignored never counted" evidence gap is closed at current source.
