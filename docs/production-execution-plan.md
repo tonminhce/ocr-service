@@ -4,6 +4,8 @@ Ngày 16/10/2026 — **M1 verified local; A03–A06/O01 verified trong phạm vi
 
 Bàn giao ngày17/10: [deep review có evidence](production-deep-review-2026-10-17.md), [18 gói thực thi H00–H17](production-agent-execution-plan-2026-10-17.md) và [prompt/harness cho agent tiếp theo](production-executor-harness-2026-10-17.md). Đây là review/kế hoạch theo yêu cầu mới, không phải các gói đã được triển khai; [review trace](production-deep-review-execution-trace-2026-10-17.md) giữ phạm vi và verification riêng.
 
+[Prompt thực thi đầy đủ](production-executor-prompt-2026-10-17.md) bổ sung goal tracking, HARD deep planning trước code và web research có primary/version evidence. Archive private `.agent-handoff/README.md` trỏ tới các tài liệu hiện tại; [refresh trace](agent-handoff-refresh-execution-trace-2026-10-17.md) phân biệt lịch sử với state/authority mới, không coi việc chuẩn bị prompt là đã thực thi.
+
 Tài liệu chuyển [roadmap nghiên cứu](production-next-roadmap.md) thành các gói thực thi có phụ thuộc, code liên quan, kiểm thử và điều kiện phát hành. Đợt đầu P00/A01/A02/B01/B02/E01 có kết quả trong [M1 execution review](m1-execution-review.md). A03 và A04 đã kiểm trên DB/volumes mới trong [A03 execution trace](a03-execution-trace.md) và [A04 execution trace](a04-execution-trace.md); [E02 memory audit](e02-memory-audit.md) đã xác định retained process và kiểm observer. Live M1 chưa cut over; retention apply, đổi model và concurrency sweep chưa thực hiện. Những gói không được đánh dấu thực thi bên dưới vẫn là kế hoạch.
 
 | Gói | Trạng thái thực thi |

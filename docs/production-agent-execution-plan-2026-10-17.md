@@ -2,13 +2,15 @@
 
 Date: 2026-10-17. **Planning/handoff only; not authorization for live deployment.** Application baseline `1f5c6c4`; verified documentation checkpoint `acb8958`. The receiving agent must discover the actual current HEAD/dirty state rather than reset to these commits.
 
-Read the [deep review/evidence register](production-deep-review-2026-10-17.md), then follow the [executor harness and copy-ready prompt](production-executor-harness-2026-10-17.md). This is an actionable continuation of [production-execution-plan](production-execution-plan.md), not a replacement for its invariants or a direction to redo completed milestones.
+Read the [deep review/evidence register](production-deep-review-2026-10-17.md), then follow the [executor harness](production-executor-harness-2026-10-17.md) and [expanded goal-driven execution prompt](production-executor-prompt-2026-10-17.md). This is an actionable continuation of [production-execution-plan](production-execution-plan.md), not a replacement for its invariants or a direction to redo completed milestones.
 
 ## 1. Outcome and authority
 
 Build an OCR service that is correct under retries/faults, bounded in memory/processes/bytes/time, fast on measured representative workloads, operable by real owners, and releasable from traceable artifacts. “Enterprise-grade” means demonstrated controls and recovery, not more services, abstraction layers or threads.
 
 The implementation agent should complete every **READY** packet, keep working on independent packets when another needs input, and leave genuine external gates visible. It must not declare the entire service production-ready from synthetic tests. A packet has separate code/test, measured-quality/capacity and production-adoption statuses.
+
+**HARD planning gate:** write/review the global execution ledger before the first maintained source edit, and a detailed packet implementation plan before every packet/scope change. Include baseline, hypothesis, primary-source research/version applicability, blast radius/callers, alternatives/YAGNI, invariants, exact change, finite budgets, negative tests, acceptance and rollback. No superficial TODO-only plan or post-hoc justification. Relevant uncertain/version-sensitive techniques require privacy-safe web research with dated primary URLs and local validation. Goal tracking must obey the actual tools and cannot replace these gates or turn external blockers into completion.
 
 Allowed work: reviewed repository edits, synthetic/disposable tests, bounded local builds/experiments, documentation and focused local commits. Not implicitly allowed: push/hosted dispatch/registry publication, real private data transfer, live cutover/restart, secret rotation, destructive retention, volume deletion, real-model concurrency increase, cloud spending or replacing original services. Public pinned artifact retrieval must be declared in the relevant packet with source/hash/license/size/time limits; never allow an implicit mutable pull or send private data to obtain it.
 
@@ -53,7 +55,7 @@ Parallelize H04 evaluation, H06 release tooling, H08 monitoring and H10 human-da
 
 **Why:** DR16 and every subsequent measurement depend on correct effective settings.
 
-1. Read repository rules, the three handoff files, prior execution plan and relevant traces. Record HEAD/branch/dirty paths, Cargo.lock/migration/source inventories, toolchains/platforms and safe configuration names/values. Do not dump environment/secrets.
+1. Read repository rules, the review/plan/harness/expanded-prompt documents, current private archive pointers when available, prior execution plan and relevant traces. Record HEAD/branch/dirty paths, Cargo.lock/migration/source inventories, toolchains/platforms and safe configuration names/values. Do not dump environment/secrets.
 2. Inventory original container IDs/states, existing volumes/networks/images, native model/Cargo/IDE consumers and disk/memory pressure. Read-only metadata only; do not stop them.
 3. Recheck current runtime settings independently of standalone defaults: W/R/L/S, ONNX intra/inter/arena, output/pixel/token limits, API budgets, SQL/Redis pools, actual replica count.
 4. Correct `docs/business-review.md` descriptions from `ocr-api/src/{config,response,server}.rs` and production Compose: eight large handlers/default four large serializers plus two small serializers; body-owned byte reservation/16 KiB transport chunks; environment-disabled versus configured service-principal review. No behavior/config change to match stale prose.

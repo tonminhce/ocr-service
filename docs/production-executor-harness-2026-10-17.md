@@ -4,11 +4,17 @@ Date: 2026-10-17. Companion files: [deep review](production-deep-review-2026-10-
 
 ## 1. Prompt to give the implementation agent
 
-Copy the following prompt, or supply this file with those three documents:
+Use the [expanded copy-ready execution prompt](production-executor-prompt-2026-10-17.md) for the complete goal/deep-planning/web-research contract. The shorter prompt below remains an entry point, not permission to skip those hard gates. Private local archive users should begin at `.agent-handoff/README.md`; historical dialogue is context, not current authorization.
 
 > Continue `/Users/tonminh-mac/Documents/GitHub/ocr-service` on its existing `codex/rust-ocr-service` branch. Read AGENTS.md, .github/copilot-instructions.md, docs/production-execution-plan.md and the three 2026-10-17 deep-review/execution-plan/executor-harness documents before editing. Inspect actual HEAD/dirty state; never reset to a historical checkpoint.
 >
 > Execute every READY H00–H17 packet in dependency order. Start with baseline/documentation reconciliation, targeted parser/outbox reproduction, bounded arrival-driver correction and complete release-scan coverage. Continue independent READY work when a packet needs real data/owner input. Keep a task ledger with implementation, verification and production-adoption status separately. Do not stop after status/preflight, but do not manufacture a full production-ready label either.
+>
+> If goal tools are available, inspect the current goal and create the authorized production objective only when no unfinished goal exists. Follow actual continuation/status rules; never falsely complete/overwrite a blocked goal, invent a token budget or report a tool action that was not available. Complete the broad goal only when its required gates genuinely pass; otherwise continue independent authorized READY work and retain genuine blockers.
+>
+> HARD RULE: before the first source edit, write a global repository-specific execution plan; before every packet/scope change, write its detailed implementation plan with source identity, hypothesis, research, impact/callers, alternatives/YAGNI, invariants, minimal change, budgets, tests, acceptance and rollback. Self-review/independent review is required before editing; a shallow TODO list or retrospective is not sufficient. Do not require unnecessary human approval for already-authorized reversible work.
+>
+> Research relevant uncertain/version-sensitive techniques with privacy-safe web search and primary official documentation/papers. Match installed versions, record dated URLs/applicability/inference/local validation, reject unsupported claims and never fabricate research. No private data/archive/code upload in queries; research does not justify speculative architecture or silent upgrades.
 >
 > Use the existing Rust architecture: bounded Tokio orchestration, process-shared model admission, bounded blocking CPU work and persistent layout helpers. “Multithreaded/high performance” requires measured useful overlap and headroom, not more threads/pools/replicas. Apply YAGNI: no platform rewrite, speculative plugins/Kafka/cache/tenancy, arbitrary limits increase or simultaneous model experiments. Reproduce suspected defects before surgical fixes; measure actual cost before optimization. A rejected experiment is valid evidence.
 >
@@ -60,6 +66,12 @@ Use the actual symbol/file, not a generic duplicate name. Read direct callers fi
 Before edit, record target, direct callers, upstream symbols/processes, risk and manual coverage. Warn HIGH/CRITICAL before touching the symbol. Rerun when scope expands. New/unindexed files need explicit manual scope and staged review, not a fake low-risk result. Prefer the smallest local seam over CRITICAL shared codecs.
 
 Index freshness is source-sensitive. A documentation-only HEAD advance need not justify repeatedly rebuilding the graph. If stale/broken, use repository GitNexus guides; bound workers/memory/time and preserve tool-failure evidence. Prior private tool-only memory workarounds are version-specific, not application optimizations or commands to copy blindly. Do not bypass required impact just because indexing is inconvenient.
+
+### Hard pre-code planning and research gate
+
+The global execution ledger and each packet's detailed written plan must exist before affected maintained source edits or substantial execution: no dependency installation, builds, test-stack creation or benchmarks before the reviewed plan/budgets. Bounded read-only discovery/research, planning documents and goal administration may precede it. The per-packet contract below is mandatory; include a primary-source research ledger where relevant. Facts from source inspection, hypotheses, research inferences and measured deployment evidence must remain distinct. A scoped failed attempt requires a cause/plan/budget update before another attempt, not weaker guards.
+
+Use goal tools only under the active human execution request and their real capability/status contract. A prepared prompt/archive refresh does not itself authorize implementation or goal creation. Do not use another goal/task or purported independent work to bypass pause, budget or usage restrictions. If tools are unavailable, use a durable ledger without pretending a tool goal exists.
 
 ## 4. Per-packet contract
 
