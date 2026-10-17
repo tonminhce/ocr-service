@@ -2,7 +2,7 @@
 
 Ngày 16/10/2026. Baseline: `69c55d3c72348e6c7fa2caa57e0af4201f6e056d`, branch `codex/rust-ocr-service`, native Cargo/rustc `1.98.1`.
 
-**Trạng thái: audit read-only hoàn tất; lượt thực thi đã tới resource preflight và NO-GO.** [Execution trace](cargo-target-optimization-execution-trace.md) ghi idle gate không đạt; cleanup, profile changes và compilation benchmark chưa thực hiện. Đây là tối ưu build/cache trên máy phát triển, không phải bằng chứng tăng OCR throughput, giảm RSS production hoặc hoàn tất các gate trong [production execution plan](production-execution-plan.md). Không thay release profile, W/R, model, containers, volumes hoặc dữ liệu OCR.
+**Trạng thái: đã thực thi cache compaction và native A/B; giữ nguyên profile mặc định theo số đo.** [Execution trace](cargo-target-optimization-execution-trace.md) giữ lịch sử preflight ban đầu cùng kết quả tiếp nối: target 42.24 → 2.49 GiB, 315 ordinary tests qua ở ba cấu hình. Line tables không đạt space gate; nonincremental làm edit-rebuild chậm rõ rệt nên không promote. Đây không phải bằng chứng tăng OCR throughput, giảm RSS production hoặc hoàn tất các gate trong [production execution plan](production-execution-plan.md). Không thay release profile, W/R, model, live containers/volumes hoặc dữ liệu OCR.
 
 ## 1. Vì sao target lớn khoảng 42 GiB?
 
@@ -51,11 +51,11 @@ Snapshot 23:09 giờ địa phương có khoảng 208.9 GiB available. Đây kh�
 | Pha | Công việc | Đầu ra / gate | Trạng thái |
 | --- | --- | --- | --- |
 | P0 | Audit inode, profiles, feature variants và consumers | Baseline có caveats, không nhầm logical/physical bytes | Hoàn tất read-only |
-| P1 | Chọn phạm vi cleanup nếu cần và bảo toàn evidence | Người dùng xác nhận phạm vi; consumers đã quiesce | Giữ nguyên target, không cleanup trong lượt thực thi |
-| P2 | A/B giảm dev debuginfo, giữ incremental | Công bằng cùng workload; kiểm disk/time/debuggability | Preflight NO-GO; chưa chạy compiler |
-| P3 | A/B incremental on/off riêng | Chọn theo edit/rebuild cost, không chỉ disk | Chưa thực thi |
-| P4 | Áp dụng đúng một thay đổi đã chứng minh | Harness qua, trace và local commit | Chưa thực thi |
-| P5 | Đánh giá cache growth sau workflow thực tế | Budget có số đo, cleanup có chủ đích | Chưa thực thi |
+| P1 | Chọn phạm vi cleanup nếu cần và bảo toàn evidence | Người dùng xác nhận phạm vi; consumers đã quiesce | DONE: incremental rồi in-place allowlist compaction; binary/object hashes, modes, mtimes, inodes giữ nguyên |
+| P2 | A/B giảm dev debuginfo, giữ incremental | Công bằng cùng workload; kiểm disk/time/debuggability | MEASURED / NOT PROMOTED: chỉ giảm 11.38%, dưới gate 25%; native tests/debugger qua |
+| P3 | A/B incremental on/off riêng | Chọn theo edit/rebuild cost, không chỉ disk | MEASURED / NOT PROMOTED: giảm 28.71% disk nhưng pilot edit 24.9 → 63.7 s |
+| P4 | Áp dụng đúng một thay đổi đã chứng minh | Harness qua, trace và local commit | Giữ Cargo defaults; [guarded post-processing reuse](e02-postprocessing-reuse-execution-trace.md) là source optimization riêng |
+| P5 | Đánh giá cache growth sau workflow thực tế | Budget có số đo, cleanup có chủ đích | Fresh workflow và no-op/edit pilot đã đo; long-term growth chưa đo, không có auto-clean scheduler |
 
 ### P1 — Cleanup có chủ đích, không phá evidence
 
@@ -151,4 +151,4 @@ Các ngưỡng dưới là **đề xuất trước thử nghiệm**, chưa phả
 
 Private ignored evidence: `artifacts/cargo-target-audit-2026-10-16/disk-audit.json` và `inode-audit.json`. File đầu chứa `du` cùng class scan chỉ trong deps/examples; class totals đó không phải phân hoạch disjoint toàn target. File thứ hai ghi full-target last-link estimates. Audit dùng filesystem metadata, không đọc lại giá trị PDF/OCR riêng tư.
 
-Đợt đầu hoàn tất **chẩn đoán + kế hoạch**. Lượt thực thi tiếp theo đã kiểm source/toolchain/host và dừng tại [idle resource gate](cargo-target-optimization-execution-trace.md), không nới ngưỡng sau khi đo. Việc dọn cache, compilation benchmark, kết quả tiết kiệm và adoption đều còn mở. Bước tiếp theo: điều phối host workload rồi chạy lại cùng preflight; khi GO mới tạo frozen source/cache và pilot P2. Incremental-only cleanup vẫn là lựa chọn riêng, không được thực hiện trong lượt này. Không có cleanup hoặc build ngầm sau gate failure.
+Đợt đầu hoàn tất **chẩn đoán + kế hoạch**, sau đó có preflight NO-GO được giữ nguyên trong lịch sử. Người dùng tiếp tục yêu cầu thực thi; lượt tiếp nối dùng watchdog chủ động, cold source/cache mới và verification cô lập. Cache đã compact, nhưng không đổi profile chỉ để có một config patch: cả hai challenger không thắng đủ tiêu chí. Giữ full debugging và incremental cho local edit loop; không thêm framework/cache daemon hoặc tăng threads. Target hiện giữ developer tools/debug closure và release cache; compiler fingerprints bị loại có chủ đích nên canonical build tiếp theo cần rebuild. Không clean trước mỗi build. Xem trace để phân biệt số đo compaction với fresh-profile comparison và giới hạn của từng phép đo.

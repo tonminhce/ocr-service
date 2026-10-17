@@ -129,6 +129,11 @@ fn make_output(
     if let Some(error) = crate::cancelled_error(cancelled) {
         return Err(error);
     }
+    let reuses_ocr_extraction = native.is_empty()
+        && recovery.is_empty()
+        && ocr
+            .windows(2)
+            .all(|pair| pair[0].page_number <= pair[1].page_number);
     let (mut blocks, pages) = select_sources(&ocr, &native);
     blocks.extend(recovery);
     let hashes: BTreeMap<_, _> = blocks
@@ -167,7 +172,11 @@ fn make_output(
     if let Some(error) = crate::cancelled_error(cancelled) {
         return Err(error);
     }
-    let raw_ocr_issues = ocr_extraction::extract(&ocr).issues;
+    let raw_ocr_issues = if reuses_ocr_extraction {
+        extraction.issues.clone()
+    } else {
+        ocr_extraction::extract(&ocr).issues
+    };
     let native_comparison = compare_sources(&ocr, &native);
     let post_processing = json!({
         "version":"evidence-postprocess-v1", "profile":profile,
@@ -573,6 +582,210 @@ fn select_sources(ocr: &[SourceBlock], native: &[SourceBlock]) -> (Vec<SourceBlo
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn parity_block(id: &str, page: u32, source: &str, text: &str) -> SourceBlock {
+        SourceBlock {
+            id: id.into(),
+            page_number: page,
+            region_index: Some(0),
+            source: source.into(),
+            text: text.into(),
+            bbox_2d: Some([10, 20, 900, 950]),
+            detector_score: (source == "ocr").then_some(0.6),
+        }
+    }
+
+    fn legacy_output(sources: &SourceInputs) -> (Value, Value) {
+        let (mut blocks, pages) = select_sources(&sources.ocr, &sources.native);
+        blocks.extend(sources.recovery.clone());
+        let hashes: BTreeMap<_, _> = blocks
+            .iter()
+            .map(|block| {
+                (
+                    block.id.clone(),
+                    format!("{:x}", Sha256::digest(block.text.as_bytes())),
+                )
+            })
+            .collect();
+        let native_pages: HashSet<_> = blocks
+            .iter()
+            .filter(|block| block.source == "native_pdf")
+            .map(|block| block.page_number)
+            .collect();
+        let markdown = blocks
+            .iter()
+            .filter(|block| {
+                block.source == "native_pdf"
+                    || (block.source == "ocr" && !native_pages.contains(&block.page_number))
+            })
+            .map(|block| block.text.as_str())
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        let extraction = ocr_extraction::extract(&blocks);
+        crate::extraction_validation::validate(&extraction, &blocks).unwrap();
+        let raw_ocr_issues = ocr_extraction::extract(&sources.ocr).issues;
+        let native_comparison = compare_sources(&sources.ocr, &sources.native);
+        let post_processing = json!({
+            "version":"evidence-postprocess-v1", "profile":"vi_rental_contract_v1",
+            "original_sha256":"a".repeat(64),
+            "native_pdf":{"selection_policy":NATIVE_POLICY,
+                "minimum_bidirectional_token_agreement":0.65,
+                "minimum_native_token_count":10,
+                "minimum_line_height_normalized":3,
+                "pages":pages,
+                "limitations":["Token agreement is a screening heuristic, not pixel verification.",
+                    "Visible signature text is not cryptographic signature verification.",
+                    "Native text and OCR remain uncalibrated; human review is required."]},
+            "coordinate_system":"normalized_0_1000_top_left_cropbox",
+            "geometry_scope":"source_block_not_individual_field",
+            "blocks":blocks, "source_text_sha256":hashes, "markdown":markdown,
+            "markdown_policy":"native_projection_where_screened; extraction_keeps_parallel_ocr_evidence",
+            "raw_ocr_quality":{"source_blocks":sources.ocr,"issues":raw_ocr_issues},
+            "native_comparison":native_comparison,
+            "issues":[{"code":"synthetic_parity_warning"}]
+        });
+        (post_processing, serde_json::to_value(extraction).unwrap())
+    }
+
+    fn assert_output_matches_legacy(sources: SourceInputs) -> (Value, Value) {
+        let expected = legacy_output(&sources);
+        let actual = make_output(
+            sources,
+            "vi_rental_contract_v1",
+            "a".repeat(64),
+            vec![json!({"code":"synthetic_parity_warning"})],
+            &CancellationToken::new(),
+        )
+        .unwrap();
+        assert_eq!(actual, expected);
+        actual
+    }
+
+    #[test]
+    fn ordered_ocr_only_output_matches_legacy_extraction() {
+        let output = assert_output_matches_legacy(SourceInputs {
+            ocr: vec![
+                parity_block(
+                    "first",
+                    1,
+                    "ocr",
+                    "HỢP ĐỒNG THUÊ NHÀ\nGiá thuê: 3.000.000 VND/tháng",
+                ),
+                parity_block("second", 1, "ocr", "Tiền cọc: #\nCần bán giao nhà"),
+                parity_block("third", 2, "ocr", "Diện tích: 50 m²"),
+            ],
+            native: Vec::new(),
+            recovery: Vec::new(),
+        });
+        assert_eq!(output.0["raw_ocr_quality"]["issues"], output.1["issues"]);
+        assert_eq!(output.1["fields"]["monthly_rent"]["state"], "found");
+    }
+
+    #[test]
+    fn unordered_ocr_pages_preserve_legacy_raw_issue_order() {
+        let blocks = [
+            parity_block("page-two-first", 2, "ocr", "Tiền cọc: #"),
+            parity_block("page-one", 1, "ocr", "Cần bán giao nhà"),
+            parity_block("page-two-last", 2, "ocr", "tạm dùng"),
+        ];
+        for ocr in [blocks.to_vec(), vec![blocks[2].clone(), blocks[1].clone()]] {
+            let output = assert_output_matches_legacy(SourceInputs {
+                ocr,
+                native: Vec::new(),
+                recovery: Vec::new(),
+            });
+            assert_ne!(output.0["raw_ocr_quality"]["issues"], output.1["issues"]);
+        }
+    }
+
+    #[test]
+    fn native_selection_and_conflict_output_match_legacy_extraction() {
+        let common =
+            "HỢP ĐỒNG THUÊ NHÀ điều khoản thanh toán bàn giao quyền nghĩa vụ trách nhiệm thời hạn";
+        let ocr = parity_block(
+            "ocr",
+            1,
+            "ocr",
+            &format!("{common}\nGiá thuê: 3.000.000 VND/tháng"),
+        );
+        for (native_text, selected) in [
+            (
+                format!("{common}\nGiá thuê: 4.000.000 VND/tháng\nCần tạm dùng"),
+                true,
+            ),
+            ("HỢP ĐỒNG THUÊ NHÀ".into(), false),
+        ] {
+            let output = assert_output_matches_legacy(SourceInputs {
+                ocr: vec![ocr.clone()],
+                native: vec![parity_block("native", 1, "native_pdf", &native_text)],
+                recovery: Vec::new(),
+            });
+            assert_eq!(
+                output.0["native_pdf"]["pages"][0]["selected_source"],
+                if selected {
+                    "native_pdf_and_ocr"
+                } else {
+                    "ocr"
+                }
+            );
+            if selected {
+                assert_eq!(output.1["fields"]["monthly_rent"]["state"], "ambiguous");
+                assert!(output.1["fields"]["monthly_rent"]["selected"].is_null());
+                assert_eq!(
+                    output.1["fields"]["monthly_rent"]["candidates"]
+                        .as_array()
+                        .unwrap()
+                        .len(),
+                    2
+                );
+                assert_ne!(output.0["raw_ocr_quality"]["issues"], output.1["issues"]);
+            }
+        }
+    }
+
+    #[test]
+    fn recovery_output_matches_legacy_without_promoting_raw_issues() {
+        let output = assert_output_matches_legacy(SourceInputs {
+            ocr: vec![parity_block(
+                "ocr",
+                1,
+                "ocr",
+                "HỢP ĐỒNG THUÊ NHÀ\nTiền cọc: #",
+            )],
+            native: Vec::new(),
+            recovery: vec![parity_block(
+                "recovery",
+                1,
+                "ocr_recovery_context",
+                "HỢP ĐỒNG THUÊ NHÀ\nTiền cọc: 6.000.000 đồng",
+            )],
+        });
+        assert_eq!(output.1["fields"]["deposit_amount"]["state"], "ambiguous");
+        assert!(output.1["fields"]["deposit_amount"]["selected"].is_null());
+        assert_ne!(output.0["raw_ocr_quality"]["issues"], output.1["issues"]);
+    }
+
+    #[test]
+    fn budget_failures_match_legacy_extraction_output() {
+        for text in ["#".repeat(257), "x".repeat(128 * 1024 + 1)] {
+            let output = assert_output_matches_legacy(SourceInputs {
+                ocr: vec![parity_block("budget", 1, "ocr", &text)],
+                native: Vec::new(),
+                recovery: Vec::new(),
+            });
+            assert_eq!(output.1["issues"][0]["code"], "extraction_budget_exceeded");
+            assert!(output.1["source_blocks"].as_array().unwrap().is_empty());
+        }
+    }
+
+    #[test]
+    fn empty_sources_match_legacy_extraction_output() {
+        assert_output_matches_legacy(SourceInputs {
+            ocr: Vec::new(),
+            native: Vec::new(),
+            recovery: Vec::new(),
+        });
+    }
 
     #[test]
     fn geometry_joins_label_and_value_but_filters_tiny_anchors() {

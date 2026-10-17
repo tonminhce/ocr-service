@@ -232,7 +232,7 @@ completion đã qua tests. Policy không tự suy từ `RETENTION_DAYS`; apply l
 
 ### E02 — Memory trước concurrency
 
-Local build disk có [audit và kế hoạch tối ưu Cargo target](cargo-target-optimization-plan.md): 42.24 GiB chủ yếu ở debug artifacts; chưa cleanup/profile change. Đây là developer-cache task, không đóng gate memory/throughput E02/E04.
+Local build disk có [kế hoạch và số đo Cargo target](cargo-target-optimization-plan.md): compaction 42.24 → 2.49 GiB với developer binary/debug closure được bảo toàn. Native A/B giữ Cargo defaults vì line tables chỉ tiết kiệm 11.38% và nonincremental làm edit-rebuild chậm 2.56× trong pilot. Đây là developer-cache task, không đóng gate memory/throughput E02/E04. [Guarded post-processing reuse](e02-postprocessing-reuse-execution-trace.md) loại lần extraction thứ hai khi input thực sự tương đương; synthetic parity và allocation traffic được kiểm, chưa có whole-worker RSS/goodput claim.
 
 **Trạng thái:** [allocation-owner audit + observer](e02-memory-audit.md) đã kiểm; allocator A/B control `layout-detect --cpu-arena on|off` is implemented with the production default unchanged. Chưa có allocator measurement, optimization promotion, representative workload envelope hoặc capacity gate. Ngày 16/10 host có 12.99/14.34 GiB swap-used, live worker 1.72/2 GiB current; A/B was intentionally deferred to avoid further pressure. Không tăng W/R/pool.
 
