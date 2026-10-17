@@ -27,12 +27,20 @@ Successful responses have `Cache-Control: private, no-store` and
 attachment` with fixed filenames, never the uploaded filename. Unknown, missing,
 unavailable and pruned artifacts return 404; no filesystem paths are accepted.
 Source responses are bounded at 50 MiB; other artifact/view JSON at 16 MiB.
-Eight read operations per API process are admitted concurrently, returning 429
-when busy. Projection and large JSON serialization run on blocking tasks so they
-do not occupy Tokio asynchronous executor threads. Core projection/review CPU work and API JSON serialization each have an additional shared eight-slot semaphore; the blocking closure owns its permit until it exits, including after its request waiter is cancelled. This admission limit bounds
-active handlers, not all bytes already buffered by slow network clients. Separate
-eight-slot CPU/serialization permits remain owned by blocking closures after
-caller cancellation, so cancelled waiters do not admit unbounded CPU work.
+By default, eight large read operations per API process are admitted
+concurrently (`RESPONSE_LARGE_CONCURRENCY`, returning 429 when busy), while
+compact status responses use a separate small-response admission budget
+(`RESPONSE_SMALL_CONCURRENCY`, default 32) so polling is not starved by large
+artifact reads. Projection and large JSON serialization run on blocking tasks so
+they do not occupy Tokio asynchronous executor threads; a shared
+`RESPONSE_SERIALIZATION_CONCURRENCY` semaphore (default 4 large slots, plus a
+fixed two small-serialization slots) bounds that CPU work, and the blocking
+closure owns its permit until it exits, including after its request waiter is
+cancelled. Large responses reserve their full byte budget on admission before
+database reads; the reservation is trimmed to the bytes actually serialized
+once the body owns them, and egress copies fixed 16 KiB chunks. This admission
+limit bounds active handlers, not all bytes already buffered by slow network
+clients, whose transfer is bounded separately by the body timeout.
 
 For exactly one landlord and tenant, field keys are stable semantic paths such
 as `tenant.birth_date`, `landlord.id_number`, `monthly_rent`, `deposit_amount`,
@@ -61,7 +69,10 @@ or detector probability has been promoted to extraction accuracy.
 ## Privileged review boundary
 
 Review is disabled (404) unless both `OCR_REVIEW_TOKEN` and
-`OCR_REVIEW_PRINCIPAL` are configured. Empty values disable the pair. The review
+`OCR_REVIEW_PRINCIPAL` are configured. Empty values disable the pair. The
+standalone environment-only default is therefore disabled; the production
+Compose deployment configures both from secret files, which enables the
+privileged review endpoints there. The review
 token must differ from the service token and contain at least 32 printable ASCII
 characters without spaces. The configured principal contains 1..128 UTF-8 bytes
 without control characters. The ordinary OCR service credential cannot mutate
@@ -73,7 +84,8 @@ fields are rejected. In deployment, a trusted review application must authentica
 its human operators and enforce its own access rules before using this privileged
 credential. Per-user OIDC, tenant authorization, a review UI, and multi-person
 approval are not implemented. Keep these credentials in a secret manager outside
-source control; the sample configuration does not enable review automatically.
+source control; review stays disabled until both credentials are actually
+configured in the deployment environment.
 
 `GET /v1/ocr/jobs/{id}/review?after_revision=0` returns the current snapshot and
 up to 100 append-only events, with `next_after_revision` and `has_more` for
