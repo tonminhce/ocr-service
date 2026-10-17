@@ -13,8 +13,8 @@ use tokio_util::sync::CancellationToken;
 use crate::{
     ProcessingError,
     parser_protocol::{
-        ErrorCode, Frame, FrameKind, Operation, REQUEST_DATA_LIMIT, RESPONSE_DATA_LIMIT,
-        RenderProfile, read_frame, write_frame,
+        ErrorCode, Frame, FrameKind, Operation, REQUEST_DATA_LIMIT, RenderProfile, read_frame,
+        write_frame,
     },
     settings::Settings,
 };
@@ -241,6 +241,7 @@ impl ParserSession {
         operation: Operation,
         cancelled: CancellationToken,
     ) -> Result<Frame, ProcessingError> {
+        let allowance = self.response_allowance(&operation)?;
         let mut stream = lock_stream(&self.stream, self.timeout, &cancelled).await?;
         let mut socket = match stream.take() {
             Some(socket) => socket,
@@ -254,7 +255,7 @@ impl ParserSession {
             write_frame(&mut socket, FrameKind::Request, &frame, REQUEST_DATA_LIMIT)
                 .await
                 .map_err(protocol_error)?;
-            read_frame(&mut socket, FrameKind::Response, RESPONSE_DATA_LIMIT)
+            read_frame(&mut socket, FrameKind::Response, allowance)
                 .await
                 .map_err(protocol_error)
         };
@@ -276,6 +277,27 @@ impl ParserSession {
                 drop(socket);
                 Err(error)
             }
+        }
+    }
+
+    fn response_allowance(&self, operation: &Operation) -> Result<u64, ProcessingError> {
+        let exceeds_bounds =
+            || ProcessingError::transient("isolated parser response exceeds the requested bounds");
+        match operation {
+            Operation::PageInfo { .. } => Ok(0),
+            Operation::NativeText => Ok(NATIVE_TEXT_LIMIT as u64),
+            Operation::RenderRgb { profile, .. } => {
+                let max_edge = match profile {
+                    RenderProfile::FullPage => self.max_image_edge,
+                    RenderProfile::CourseLayout => self.page_max_edge,
+                };
+                let edge_pixels = u64::from(max_edge)
+                    .checked_mul(u64::from(max_edge))
+                    .ok_or_else(exceeds_bounds)?;
+                let pixels = self.max_pixels.min(edge_pixels);
+                pixels.checked_mul(3).ok_or_else(exceeds_bounds)
+            }
+            _ => Ok(0),
         }
     }
 }
@@ -447,6 +469,7 @@ mod tests {
 
     use super::*;
     use crate::parser_protocol::PROTOCOL_VERSION;
+    use crate::parser_protocol::RESPONSE_DATA_LIMIT;
 
     #[tokio::test]
     async fn control_responses_reject_payloads_before_reading_metadata() {
@@ -1052,6 +1075,113 @@ mod tests {
             .expect("second render must complete")
             .expect("second render must succeed");
         assert_eq!((image.width(), image.height()), (10, 20));
+        let _ = server.shutdown().await;
+    }
+
+    async fn withheld_header_session(
+        requested: Operation,
+        header_data_length: u64,
+    ) -> (ParserSession, JoinHandle<()>, TempDir) {
+        let (session, mut server, directory) = two_render_session().await;
+        let expected = requested.clone();
+        let helper = tokio::spawn(async move {
+            let request = read_frame(&mut server, FrameKind::Request, REQUEST_DATA_LIMIT)
+                .await
+                .unwrap();
+            assert_eq!(request.operation, expected);
+            let mut header = Vec::from(*b"OCRP");
+            header.extend_from_slice(&PROTOCOL_VERSION.to_be_bytes());
+            header.extend_from_slice(&(FrameKind::Response as u16).to_be_bytes());
+            header.extend_from_slice(&1_u32.to_be_bytes());
+            header.extend_from_slice(&header_data_length.to_be_bytes());
+            server.write_all(&header).await.unwrap();
+            let mut ignored = [0_u8; 1];
+            let _ = tokio::io::AsyncReadExt::read(&mut server, &mut ignored).await;
+        });
+        (session, helper, directory)
+    }
+
+    #[tokio::test]
+    async fn oversized_rgb_header_is_rejected_before_body_wait() {
+        let request = Operation::RenderRgb {
+            page: 1,
+            profile: RenderProfile::CourseLayout,
+        };
+        let (session, helper, _directory) =
+            withheld_header_session(request, 64 * 1024 * 1024).await;
+        let error = session
+            .render_rgb(1, RenderProfile::CourseLayout, CancellationToken::new())
+            .await
+            .unwrap_err();
+        assert_eq!(error.message, "isolated parser IPC failed");
+        assert!(error.retryable);
+        helper.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn oversized_native_text_header_is_rejected_before_body_wait() {
+        let (session, helper, _directory) =
+            withheld_header_session(Operation::NativeText, 4 * 1024 * 1024 + 1).await;
+        let error = session
+            .native_text(CancellationToken::new())
+            .await
+            .unwrap_err();
+        assert_eq!(error.message, "isolated parser IPC failed");
+        assert!(error.retryable);
+        helper.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn page_info_response_data_is_rejected_before_body_wait() {
+        let (session, helper, _directory) =
+            withheld_header_session(Operation::PageInfo { page: 1 }, 1024).await;
+        let error = session
+            .page_info(1, CancellationToken::new())
+            .await
+            .unwrap_err();
+        assert_eq!(error.message, "isolated parser IPC failed");
+        assert!(error.retryable);
+        helper.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn exact_allowance_rgb_frame_is_still_accepted() {
+        let (session, mut server, _directory) = two_render_session().await;
+        let render = session.render_rgb(1, RenderProfile::CourseLayout, CancellationToken::new());
+        let mut render = Box::pin(render);
+        timeout(Duration::from_secs(2), async {
+            let serve = async {
+                let request = read_frame(&mut server, FrameKind::Request, REQUEST_DATA_LIMIT)
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    request.operation,
+                    Operation::RenderRgb {
+                        page: 1,
+                        profile: RenderProfile::CourseLayout,
+                    }
+                );
+                write_frame(
+                    &mut server,
+                    FrameKind::Response,
+                    &rgb_frame(40, 40),
+                    RESPONSE_DATA_LIMIT,
+                )
+                .await
+                .unwrap();
+            };
+            tokio::select! {
+                _ = serve => {}
+                result = &mut render => panic!("render finished without a server: {result:?}"),
+            }
+        })
+        .await
+        .expect("render request must be served");
+        let image = timeout(Duration::from_secs(2), render.as_mut())
+            .await
+            .expect("render must complete")
+            .expect("render at the exact allowance must succeed");
+        assert_eq!((image.width(), image.height()), (40, 40));
         let _ = server.shutdown().await;
     }
 }
