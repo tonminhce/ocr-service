@@ -1,5 +1,9 @@
 //! Real HTTP/1 TCP sockets exercise backpressure that Tower oneshot cannot.
-use axum::{Router, response::IntoResponse, routing::get};
+use axum::{
+    Router,
+    response::IntoResponse,
+    routing::{get, post},
+};
 use ocr_api::{
     config::{ResponseSettings, TransportSettings},
     response::ResponseBudget,
@@ -234,6 +238,168 @@ async fn tcp_backpressure_rss_diagnostic() {
             "steady_tail_spread_kib":tail_spread,
             "cycles":12,"large_payload_bytes":PAYLOAD,"simultaneous_large_bodies":2,
             "scope":"single-process synthetic socket fixture; not whole-deployment capacity"
+        })
+    );
+    assert!(
+        tail_spread < 64 * 1024,
+        "steady allocations did not plateau within64MiB diagnostic allowance"
+    );
+    let _ = stop.send(());
+}
+
+#[tokio::test]
+async fn combined_pressure_rss_envelope() {
+    fn rss_kib() -> u64 {
+        let output = std::process::Command::new("ps")
+            .args(["-o", "rss=", "-p", &std::process::id().to_string()])
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        std::str::from_utf8(&output.stdout)
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap()
+    }
+    let budget = Arc::new(ResponseBudget::new(ResponseSettings {
+        large_concurrency: 2,
+        large_reserved_bytes: 2 * PAYLOAD,
+        max_source_bytes: PAYLOAD,
+        body_timeout: Duration::from_secs(10),
+        ..Default::default()
+    }));
+    let upload_budget = budget.clone();
+    let app = Router::new()
+        .route(
+            "/large",
+            get({
+                let budget = budget.clone();
+                move || {
+                    let budget = budget.clone();
+                    async move {
+                        match budget.json() {
+                            Ok(admission) => admission
+                                .bytes(vec![b'x'; PAYLOAD], "application/octet-stream")
+                                .unwrap(),
+                            Err(error) => error.into_response(),
+                        }
+                    }
+                }
+            }),
+        )
+        .route(
+            "/upload",
+            post({
+                let budget = upload_budget;
+                move |body: axum::body::Bytes| {
+                    let budget = budget.clone();
+                    async move {
+                        assert!(body.len() <= 2 * 1024 * 1024);
+                        match budget.json() {
+                            Ok(admission) => admission
+                                .bytes(
+                                    serde_json::to_vec(&serde_json::json!({
+                                        "accepted_bytes": body.len()
+                                    }))
+                                    .unwrap(),
+                                    "application/json",
+                                )
+                                .unwrap(),
+                            Err(error) => error.into_response(),
+                        }
+                    }
+                }
+            }),
+        )
+        .route(
+            "/status",
+            get({
+                let budget = budget.clone();
+                move || {
+                    let budget = budget.clone();
+                    async move {
+                        match budget.small() {
+                            Ok(admission) => admission
+                                .json(serde_json::json!({"status":"running"}))
+                                .await
+                                .unwrap_or_else(IntoResponse::into_response),
+                            Err(error) => error.into_response(),
+                        }
+                    }
+                }
+            }),
+        );
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let (stop, stopped) = tokio::sync::oneshot::channel();
+    tokio::spawn(async move {
+        server::serve(listener, app, TransportSettings::default(), async {
+            let _ = stopped.await;
+        })
+        .await
+        .unwrap();
+    });
+    let upload_client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(5))
+        .build()
+        .unwrap();
+    let baseline = rss_kib();
+    let mut held_samples = Vec::new();
+    let mut drained_samples = Vec::new();
+    for cycle in 0..12 {
+        for _ in 0..4 {
+            let response = upload_client
+                .post(format!("http://{address}/upload"))
+                .body(vec![b'u'; 2 * 1024 * 1024])
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(response.status(), 200);
+        }
+        let held = unread_large(address).await;
+        let held_two = unread_large(address).await;
+        let saturated = upload_client
+            .post(format!("http://{address}/upload"))
+            .body(vec![b'u'; 2 * 1024 * 1024])
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(saturated.status(), 429);
+        for _ in 0..8 {
+            assert_eq!(request_get(address, "/status").await.status(), 200);
+        }
+        let cancelled: Vec<_> = (0..4).map(|_| budget.json().err().map(|_| ())).collect();
+        drop(cancelled);
+        held_samples.push(rss_kib());
+        drop((held, held_two));
+        tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                if let Ok(first) = budget.json()
+                    && let Ok(second) = budget.json()
+                {
+                    drop((first, second));
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("large slots must return after slow readers disconnect");
+        drained_samples.push(rss_kib());
+        let _ = cycle;
+    }
+    let tail = &held_samples[4..];
+    let tail_spread = tail.iter().max().unwrap() - tail.iter().min().unwrap();
+    eprintln!(
+        "api_combined_pressure_envelope={}",
+        serde_json::json!({
+            "pid":std::process::id(), "baseline_kib":baseline,
+            "held_kib":held_samples, "drained_kib":drained_samples,
+            "steady_tail_spread_kib":tail_spread,
+            "cycles":12, "large_payload_bytes":PAYLOAD,
+            "upload_bytes_per_cycle":8 * 1024 * 1024,
+            "status_polls_per_cycle":8, "cancelled_cpu_waiters":4,
+            "scope":"single-process synthetic transport fixture; not whole-deployment capacity"
         })
     );
     assert!(
