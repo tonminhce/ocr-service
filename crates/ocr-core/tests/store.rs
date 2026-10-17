@@ -1812,3 +1812,123 @@ async fn complete_retaining_input_rechecks_wall_clock_after_unchanged_row_lock_w
 async fn fail_rechecks_wall_clock_after_unchanged_row_lock_wait() {
     unchanged_locked_row_rechecks_expiry(ExpiringWrite::Fail).await;
 }
+
+#[tokio::test]
+#[ignore = "requires TEST_DATABASE_URL; population probe prints scaling medians to stderr"]
+async fn store_hot_query_scaling_probe() {
+    let db = TestDatabase::new().await;
+    let payload: String = "x".repeat(8 * 1024);
+    let result_json: serde_json::Value =
+        serde_json::json!({"markdown": payload, "layout": [], "extraction": null});
+
+    let median = |values: &[f64]| {
+        let mut sorted = values.to_vec();
+        sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        sorted[sorted.len() / 2]
+    };
+    let mut report_steps = Vec::new();
+
+    for target in [10_000i64, 50_000, 100_000] {
+        while {
+            let count: i64 = sqlx::query_scalar("SELECT count(*) FROM jobs")
+                .fetch_one(&db.pool)
+                .await
+                .unwrap();
+            count < target
+        } {
+            let take = 5_000i64.min(
+                target - {
+                    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM jobs")
+                        .fetch_one(&db.pool)
+                        .await
+                        .unwrap();
+                    count
+                },
+            );
+            sqlx::query(
+                "INSERT INTO jobs (id, filename, media_type, sha256, input, idempotency_key, status, attempts, available_at, result, created_at, updated_at) \
+                 SELECT gen_random_uuid(), 'probe.png', 'image/png', 'a', '\x0102', \
+                    NULL, CASE WHEN g % 5 = 0 THEN 'succeeded' ELSE 'queued' END, 0, \
+                    clock_timestamp() - (g || ' seconds')::interval, \
+                    CASE WHEN g % 5 = 0 THEN $1 ELSE NULL END, \
+                    clock_timestamp(), clock_timestamp() \
+                 FROM generate_series(1, $2::bigint) AS g",
+            )
+            .bind(result_json.clone())
+            .bind(take)
+            .execute(&db.pool)
+            .await
+            .unwrap();
+            sqlx::query(
+                "INSERT INTO job_outbox (job_id, next_dispatch_at) \
+                 SELECT id, clock_timestamp() - INTERVAL '5 seconds' FROM jobs \
+                 WHERE status = 'queued' AND id NOT IN (SELECT job_id FROM job_outbox)",
+            )
+            .execute(&db.pool)
+            .await
+            .unwrap();
+        }
+
+        let mut claim_ms = Vec::new();
+        let mut outbox_ms = Vec::new();
+        let mut snapshot_ms = Vec::new();
+        for _ in 0..5 {
+            let started = std::time::Instant::now();
+            let claimed = db.store.claim(1, 30).await.unwrap();
+            claim_ms.push(started.elapsed().as_secs_f64() * 1000.0);
+            if let Some(job) = claimed {
+                let _ = db
+                    .store
+                    .fail(job.job.id, job.lease_token, "probe reset", false, 3, 0)
+                    .await;
+            }
+            let started = std::time::Instant::now();
+            let deliveries = db.store.claim_outbox(1, 30).await.unwrap();
+            outbox_ms.push(started.elapsed().as_secs_f64() * 1000.0);
+            if let Some(delivery) = deliveries.into_iter().next() {
+                let _ = db
+                    .store
+                    .mark_dispatched(delivery.job_id, delivery.token, 30)
+                    .await;
+            }
+            let started = std::time::Instant::now();
+            let _ = db.store.operational_snapshot().await.unwrap();
+            snapshot_ms.push(started.elapsed().as_secs_f64() * 1000.0);
+        }
+        let claim_plan: String = sqlx::query_scalar(
+            "SELECT plan FROM (EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) \
+             SELECT id FROM jobs WHERE status='queued' AND available_at <= clock_timestamp() \
+             ORDER BY available_at, created_at, id LIMIT 1 FOR UPDATE SKIP LOCKED) AS q, \
+             LATERAL (SELECT jsonb_pretty(jsonb_agg(jsonb_build_object('node', plan->>'Node Type', 'buffers', plan->'Shared Read Blocks')))) AS plan FROM q.query_plan) AS x",
+        )
+        .fetch_one(&db.pool)
+        .await
+        .unwrap_or_default();
+        let total: i64 = sqlx::query_scalar("SELECT count(*) FROM jobs")
+            .fetch_one(&db.pool)
+            .await
+            .unwrap();
+        let bytes: i64 = sqlx::query_scalar("SELECT pg_total_relation_size('jobs')")
+            .fetch_one(&db.pool)
+            .await
+            .unwrap();
+        report_steps.push(serde_json::json!({
+            "jobs": total,
+            "jobs_table_bytes": bytes,
+            "claim_ms_median": median(&claim_ms),
+            "outbox_claim_ms_median": median(&outbox_ms),
+            "snapshot_ms_median": median(&snapshot_ms),
+            "claim_plan_head": claim_plan.lines().take(6).collect::<Vec<_>>().join(" | "),
+        }));
+    }
+    eprintln!(
+        "store_hot_query_scaling_probe={}",
+        serde_json::json!({
+            "steps": report_steps,
+            "repeats": 5,
+            "result_json_bytes": 8 * 1024,
+            "scope": "disposable synthetic population probe; not production capacity"
+        })
+    );
+    db.cleanup().await;
+}
