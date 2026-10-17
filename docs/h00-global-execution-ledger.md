@@ -117,3 +117,17 @@ verification, measurement, adoption. Never relabel a gate to close it.
 
 - 2026-10-18: ledger created at H00 start. GitNexus index refreshed to
   `b885a48`. Business-review.md reconciliation scoped (see H00 trace).
+
+## Change log (continued)
+
+- 2026-10-18 (round 1): H01 `fd22a2a` (DR01 reproduced+fixed), H02
+  `8280fd3` (DR02 bounded), H03 `d5bbb52` (DR03 reproduced+fixed), H04
+  `f7b422e` (DR04 generator separation), H06 `4ddc013` (DR05/06/15 scan-set
+  + identity), H05 `50bd4cd` (strict capture controls). Workspace 324/0/91;
+  Python 62/0; comment guards 0/0 at every commit. All 13 live containers
+  and volumes preserved; both H03 fixtures removed with postflight.
+- Next READY: H08 collector/rule fixtures (adoption gated on paging
+  authority), H09 synthetic memory envelope (real sessions gated on
+  headroom: host free 23%, swap 11.95/13.31 GiB), H11 machine-only v2
+  sidecar. H07 local candidate waits on freezing H01–H06 (now frozen at
+  50bd4cd) and a build/rehearsal budget decision.
