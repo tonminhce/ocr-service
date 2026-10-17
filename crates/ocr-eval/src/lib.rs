@@ -3,6 +3,7 @@
 pub mod arrival;
 pub mod benchmark;
 pub mod v2;
+pub mod v2_export;
 use anyhow::{Context, Result, bail, ensure};
 use chrono::NaiveDate;
 use ocr_core::{

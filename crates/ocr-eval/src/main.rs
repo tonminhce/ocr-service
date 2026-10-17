@@ -10,11 +10,43 @@ use std::{collections::BTreeMap, path::Path};
 #[tokio::main]
 async fn main() -> Result<()> {
     let mut args = std::env::args().skip(1);
-    let command = args.next().context(
-        "usage: ocr-eval score|score-v2|benchmark|arrival MANIFEST --split dev|calibration|test [options]",
-    )?;
+    let command = args
+        .next()
+        .context("usage: ocr-eval score|score-v2|export-v2|benchmark|arrival MANIFEST [options]")?;
     let manifest = args.next().context("manifest path is required")?;
     let mut options = BTreeMap::new();
+    if command == "export-v2" {
+        let result_path = args
+            .next()
+            .context("export-v2 requires the OCR result JSON path")?;
+        let mut export_options = BTreeMap::new();
+        while let Some(name) = args.next() {
+            ensure!(name.starts_with("--"), "options must use --name value");
+            let value = args.next().context("missing option value")?;
+            ensure!(
+                export_options.insert(name, value).is_none(),
+                "duplicate option"
+            );
+        }
+        ensure!(
+            export_options.len() == 2,
+            "export-v2 takes exactly --source-sha256 and --output"
+        );
+        let source_sha256 = export_options
+            .remove("--source-sha256")
+            .context("--source-sha256 is required")?;
+        let output = export_options
+            .remove("--output")
+            .context("--output sidecar path is required")?;
+        let report = ocr_eval::v2_export::export(
+            Path::new(&manifest),
+            Path::new(&result_path),
+            &source_sha256,
+            Path::new(&output),
+        )?;
+        println!("{}", serde_json::to_string_pretty(&report)?);
+        return Ok(());
+    }
     while let Some(name) = args.next() {
         ensure!(name.starts_with("--"), "options must use --name value");
         let value = args.next().context("missing option value")?;
