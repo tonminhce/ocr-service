@@ -186,3 +186,14 @@ verification, measurement, adoption. Never relabel a gate to close it.
   at 100k within its 3 s observer budget; no migration justified). Both
   probes are ignored-tagged measurement tools; fixtures disposed;
   13 originals intact.
+
+## Change log (round 7)
+
+- 2026-10-18: H11b `6c9910e` — v2 sidecar observations now bind to real
+  region polygons (0..1000 frame scaled to page pixels) when the evidence
+  quote uniquely matches one stored layout region; ambiguous/absent
+  quotes fall back to page-rect with explicit counters. Loader/scorer
+  acceptance with an explicit region-polygon assertion; workspace
+  329/0/93; gates green. Closes the annotation guide's region-geometry
+  adapter gap for the supported scope; independent gold remains the
+  quality gate.
