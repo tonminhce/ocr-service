@@ -140,3 +140,18 @@ verification, measurement, adoption. Never relabel a gate to close it.
   reader/status/cancellation invariants + RSS plateau, 329/0/91 workspace).
   H07 local candidate: H01–H06 frozen; build+rehearsal budget decision remains
   (Docker build time/disk vs. host pressure) before the canonical image run.
+
+## Change log (round 3)
+
+- 2026-10-18: H07 LOCAL candidate `683b591` + capture fix `525e301`.
+  Canonical images built from frozen `145845f` (clean tree):
+  app `e5e743d77776`, parser `021854b7ab9d`, backup `261083404c97`,
+  all digest-pinned bases declared+verified. In-image parser-verification
+  112+20+14/0/1; boundary matrix 7/7 with 13 originals preserved; pipeline
+  drill 3 scenarios PASS; monitoring drill 18/18 PASS with H05 capture
+  hashes; release inventory+lock written (registry_publication_verified:
+  false). First smoke attempt hit the preexisting stack's port 9592 —
+  recorded; rerun with port overrides passed. H05 wiring regression
+  (mixed stdout/stderr log) caught by the drill and fixed same round.
+  External provenance/hosted runs/push remain authority-gated; no
+  capacity/quality claim.
