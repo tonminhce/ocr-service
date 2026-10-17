@@ -1,6 +1,6 @@
 # Cargo target optimization: execution and verification
 
-Current checkpoint, 17/10/2026: cache compaction completed, native workspace verification passed and neither profile challenger was promoted. Target allocation decreased from 42.24 to 2.49 GiB. The 16/10 preflight below is historical, not the final outcome. Final isolated Linux release/integration acceptance is recorded separately when complete.
+Current checkpoint, 17/10/2026: cache compaction, native workspace verification and full isolated Linux release/integration acceptance passed; neither profile challenger was promoted. Target allocation decreased from 42.24 to 2.49 GiB. The 16/10 preflight below is historical, not the final outcome. Final Linux results and owned-lab cleanup are recorded below.
 
 Resource preflight ngày 16/10/2026, 23:23–23:30 Asia/Saigon. Source checkpoint: `43dde3e79b1c5b188953ca3b404ad7dfda54e5a3`. Người dùng đã yêu cầu cung cấp kế hoạch chi tiết trước rồi thực thi; [kế hoạch đã commit](cargo-target-optimization-plan.md) là phạm vi thực hiện.
 
@@ -125,8 +125,32 @@ The 128 MiB trial exhausted its internal buffer pool; the default/native startup
 
 ### Final verification boundary and private evidence
 
-Native formatting, both comment guards, 42 Python tests, ordinary workspace tests and strict Clippy pass for the code/configuration tested. Fresh Linux release verification and the 90 explicit cases run in an owned, internally networked disposable lab with no published ports or Docker volumes; its final acceptance/cleanup is not inferred from a running phase marker. Existing verify-cluster objects caused the stricter empty-cluster guard to fail, so they were left alone rather than deleted or used as fixtures.
+Native formatting, both comment guards, 42 Python tests, ordinary workspace tests and strict Clippy pass for the code/configuration tested. Fresh Linux release verification and all 90 explicit cases have also passed independent final acceptance in an owned, internally networked disposable lab with no published ports or Docker volumes. Existing verify-cluster objects caused the stricter empty-cluster guard to fail, so they were left alone rather than deleted or used as fixtures.
 
-Private evidence is under `artifacts/cargo-target-execute-2026-10-16/` and `artifacts/cargo-performance-2026-10-17/linux-evidence/`. It includes preservation manifests, lock-interoperability logs, actual allocation reports, failed/successful commands, source hashes, profile decisions, debugger/backtrace results and cgroup/lab state. Experimental target caches are disposable and must be retired after evidence capture, not moved elsewhere and called reclaimed space. No push, live cutover, real-model call, W/R increase or volume deletion is authorized by these results. Real quality, representative RSS/capacity, reviewer identity and operational production gates remain open.
+Private evidence is under `artifacts/cargo-target-execute-2026-10-16/` and `artifacts/cargo-performance-2026-10-17/linux-evidence/`. It includes preservation manifests, lock-interoperability logs, actual allocation reports, failed/successful commands, source hashes, profile decisions, debugger/backtrace results and cgroup/lab state. Both experimental native target caches were retired after small timing reports were copied to the evidence directory: their final pre-clean allocations were 6,351,364,096 and 3,945,291,776 bytes, and both are now zero. These later totals include additional probes and differ from the frozen comparison rows above. No giant cache was relocated and called reclaimed space. No push, live cutover, real-model call, W/R increase or volume deletion is authorized by these results. Real quality, representative RSS/capacity, reviewer identity and operational production gates remain open.
 
 The native checkpoint stages exactly five files: one worker source file and four documentation files. Both required GitNexus compare/staged checks report LOW, eighteen mapped symbols and zero mapped execution flows. This does not negate the separate HIGH upstream warning or prove absence of dynamic worker callers; actual source/callers and full-output tests were reviewed. The new trace was separately link-checked because it has no indexed symbols. Both comment guards pass with 130/105 files and zero violations; 42 Python tests, formatting/whitespace and all 120 compiled-source hashes pass. Private fixtures, binaries, cache scripts, logs and the preexisting untracked harness files are excluded from the checkpoint commit.
+
+### Completed Linux release acceptance at source commit `1f5c6c4`
+
+The full source increment above is committed locally as `1f5c6c4`. Linux ARM64 verification uses the immutable cached Rust/Cargo 1.99.0 builder, read-only compiled source mounts, one CPU, 1 GiB memory with no container swap and 256 PIDs. No profile/Rust flags override was present. Release thin LTO and stripping remain exactly the repository defaults.
+
+| Accepted check | Result |
+| --- | --- |
+| Compiled source identity | All 120 repository paths match; all 238 frozen snapshot paths match their own manifest |
+| Ordinary workspace tests | 316 passed, zero failed, 90 ignored, across 22 expected source-keyed target groups |
+| Explicit disposable tests | All 90 passed; zero failed or ignored |
+| Strict release Clippy | Workspace/all-targets with `-D warnings` passed |
+| Export inventory | Exactly 12 executable ELF64 little-endian AArch64 binaries, individual SHA-256 recorded |
+| Successful-phase cgroup peaks | Workspace tests 597,921,792 bytes; Clippy/exports 810,995,712 bytes (773.43 MiB) |
+| Successful-phase OOM deltas | Zero OOM, OOM-kill and OOM-group-kill events |
+| Fixture postflight | No extra PostgreSQL database/test schema/backup-role dependencies; Redis maxmemory zero/noeviction and zero observed remaining keys |
+| Cleanup | Only the four owner-labelled builder/fixture containers and their internal network removed; no volume deletion; all 13 original running IDs preserved |
+
+Native ordinary count remains 315. Linux adds the platform-specific `process::tests::enospc_and_sync_failure_never_return_successful_digest`; neither the 90 ignored ordinary cases nor the earlier narrow 14-test run is double-counted. The explicit cases use only fresh synthetic PostgreSQL/Redis fixtures plus the existing synthetic RSS and Poppler cases.
+
+An earlier aggregate workspace compilation reached its 900-second command deadline (exit 124, no OOM, approximately 922.73 MiB peak). Continuation split the existing workspace target selection into bounded, checkpointed groups without changing source, features, release profile or hard limits. The completed test phase then stopped because the base image did not include Clippy. Its successful tests and failure log were preserved separately. The exact Rust 1.99.0 ARM64 Clippy component was obtained from the official distribution, checked against the manifest-pinned SHA-256, then installed offline only in this disposable builder. Strict Clippy and all binary exports completed with exit zero. This is not a signed-image provenance claim. A counter-copy permission error on the first continuation launch was retained and fixed in private orchestration; it did not run a compiler or change application source.
+
+The independent acceptance audit validates the exact group inventory, source-keyed checkpoints and log hashes, rather than subtracting a fixed native count from a resumable aggregate log. It binds the successful Clippy command to the ordered continuation, terminal exit zero and complete export phase. Initial failed fixtures, timed-out compilation and missing-component attempts remain explicit historical evidence, not completed passes. Pre-cleanup inspections and `cleanup-audit.json` retain the owner/limit/source binding after the disposable containers are retired.
+
+The canonical native `target` is still 2,668,896,256 allocated bytes (2.49 GiB) after verification. The Linux build cache was retired with its owned builder, not moved into another permanent target. This closes the Cargo cleanup and guarded reuse package; canonical runtime packaging, current-image replay/provenance and the execution plan's real quality/capacity/operations gates remain separate.

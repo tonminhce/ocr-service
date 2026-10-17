@@ -1,6 +1,6 @@
 # E02: reuse equivalent OCR-only extraction issues
 
-Date: 2026-10-17. Status: native implementation and synthetic verification passed; final isolated Linux release verification is recorded in the accompanying Cargo execution trace. No live adoption or production throughput claim.
+Date: 2026-10-17. Status: native implementation and full isolated Linux release verification passed at source commit `1f5c6c4`; see the [Cargo execution trace](cargo-target-optimization-execution-trace.md). No live adoption or production throughput claim.
 
 ## Review and bounded implementation
 
@@ -30,6 +30,8 @@ Six added tests compare both complete JSON outputs against a test-only implement
 Initial synthetic fixtures contained an invalid monthly-period spelling and incorrectly expected `conflict` for two observations with the same contract origin. The legacy equality checks passed, but those extra semantic assertions failed. The fixtures were corrected to the repository's `VND/tháng` grammar. The native disagreement assertion now follows the existing resolver: `ambiguous`, null selection and exactly two candidates. Production extraction rules were not changed to satisfy tests. Both failed Linux attempts/logs/snapshots are retained privately.
 
 Native Rust/Cargo 1.98.1 verification passes all 315 ordinary workspace tests under each of the full-debug/incremental baseline, line-tables-only and nonincremental configurations. The 90 ignored cases are not counted as passed by those commands. Strict workspace/all-targets Clippy passes for all three configurations. Native source formatting, Python harness and comment-policy results are recorded with the final package verification.
+
+Linux ARM64 Rust/Cargo 1.99.0 independently passes 316 ordinary workspace tests and all 90 explicit cases on fresh disposable fixtures, plus strict release/all-targets Clippy. The extra ordinary test is Linux-specific ENOSPC/sync-failure coverage, not an inconsistent native count. All 120 compiled source paths match the committed increment; 12 executable release exports are hash-recorded. Completed phases remain below the fixed 1 GiB no-swap ceiling with zero OOM deltas. An earlier bounded compile timeout and the base image's missing Clippy component are preserved separately, not presented as successful commands. Only the owned lab was retired after acceptance; original services and volumes remain unchanged.
 
 ## Allocation probe and limits
 
