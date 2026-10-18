@@ -197,3 +197,14 @@ verification, measurement, adoption. Never relabel a gate to close it.
   329/0/93; gates green. Closes the annotation guide's region-geometry
   adapter gap for the supported scope; independent gold remains the
   quality gate.
+
+## Change log (round 8)
+
+- 2026-10-18: H14 rung 2 — 60-min sustained arrival at 0.025/s: 90/90
+  accepted, ALL completed server-side (93 succeeded incl. smoke, 0
+  failed, 0 lease loss, outbox drained, memory 20–24% stable). Client's
+  56 "failed" = per-document 900 s deadline expiring while jobs queued
+  (Little's-law wait ~39 min); server reconciliation proves success.
+  Driver-budget lesson recorded: sustained-rate rungs need a
+  per-document deadline above expected queue wait. 3 fixture volumes
+  retained/inventoried; 13 originals intact.
